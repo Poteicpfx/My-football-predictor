@@ -298,7 +298,6 @@ def smart_advisor(res, q):
             f"🎯 **Best Pick:** **{mkts[0][0]}** (`{mkts[0][1]*100:.1f}%`) | **Combo:** `{res['Combo']}`\n\n"
             f"1. **{mkts[0][0]}** — `{mkts[0][1]*100:.1f}%`\n2. **{mkts[1][0]}** — `{mkts[1][1]*100:.1f}%`\n3. **{mkts[2][0]}** — `{mkts[2][1]*100:.1f}%`\n\n"
             f"💎 **Best Value:** `{bev_s}` (`{bev_v*100:+.1f}%` EV) | **Scores:** {', '.join(r['top_scores'])}")
-
 def ask_llm(provider, key, ctx, hist, q):
     sys_p = f"You are an expert football betting analyst. Use ONLY these stats to pick the best option, backup, and risk:\n{ctx}"
     k = key.strip()
@@ -312,15 +311,17 @@ def ask_llm(provider, key, ctx, hist, q):
                 err = f"Groq Error {r.status_code}: {r.text[:150]}"
             except Exception as e: err = str(e)
         return err
-    contents = [{"role": "user" if m["role"] == "user" else "model", "parts": [{"text": m["content"]}]} for m in hist[-6:]] + [{"role": "user", "content": q}]
+    contents = [{"role": "user" if m["role"] == "user" else "model", "parts": [{"text": m["content"]}]} for m in hist[-6:]] + [{"role": "user", "parts": [{"text": q}]}]
     err = ""
-    for m in ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-3.6-flash"]:
+    for m in ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-3.6-flash", "gemini-flash-latest"]:
         try:
             r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={k}", headers={"Content-Type": "application/json"}, json={"system_instruction": {"parts": [{"text": sys_p}]}, "contents": contents, "generationConfig": {"temperature": 0.3}}, timeout=25)
             if r.status_code == 200: return r.json()["candidates"][0]["content"]["parts"][0]["text"]
             err = f"Gemini Error {r.status_code}: {r.text[:150]}"
         except Exception as e: err = str(e)
     return err
+
+
 
 # --- 6. SIDEBAR ---
 if "daily_list" not in st.session_state: st.session_state.daily_list = []
