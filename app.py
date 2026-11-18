@@ -6,7 +6,7 @@ import pandas as pd
 import numpy as np
 from scipy.stats import poisson
 
-st.set_page_config(page_title="World Football Predictor", page_icon="🌍", layout="wide")
+st.set_page_config(page_title="World Football Predictor + AI", page_icon="🌍", layout="wide")
 
 # --- 1. COMPETITIONS CATALOG ---
 ESPN_CUPS_AND_INTL = {
@@ -27,8 +27,8 @@ MAIN_CSV_LEAGUES = {
     "🇬🇧 England - League 1": "E2",
     "🇬🇧 England - League 2": "E3",
     "🇬🇧 England - National League": "EC",
-    "Scotland - Premiership": "SCO",
-    "Scotland - Championship": "SC1",
+    "🏴󠁧󠁢󠁳󠁣󠁴󠁿 Scotland - Premiership": "SC0",
+    "🏴󠁧󠁢󠁳󠁣󠁴󠁿 Scotland - Championship": "SC1",
     "🇪🇸 Spain - La Liga": "SP1",
     "🇪🇸 Spain - Segunda": "SP2",
     "🇩🇪 Germany - Bundesliga": "D1",
@@ -110,7 +110,7 @@ def load_bets():
 
 init_db()
 
-# --- 3. DATA LOADERS (ESPN PUBLIC + CSV + GOAL API) ---
+# --- 3. DATA LOADERS ---
 @st.cache_data(ttl=1800)
 def load_espn_competition(slug):
     base = f"https://site.api.espn.com/apis/site/v2/sports/soccer/{slug}/scoreboard"
@@ -208,9 +208,7 @@ def search_goal_api_leagues(query, api_key):
             headers={"Authorization": f"Bearer {api_key}"},
             timeout=15,
         )
-        if r.status_code != 200:
-            return []
-        return r.json().get("data", [])
+        return r.json().get("data", []) if r.status_code == 200 else []
     except Exception:
         return []
 
@@ -320,7 +318,6 @@ def analyze_fixture(df, home, away, odds_1, odds_x, odds_2):
     h_last5 = get_team_metrics(df, home, "home", last_n=5)
     a_last5 = get_team_metrics(df, away, "away", last_n=5)
 
-    # Fallback to overall form if a cup team hasn't played home/away yet
     if h_last5["form"] == "-" and h_all["form"] != "-":
         h_last5 = h_all
     if a_last5["form"] == "-" and a_all["form"] != "-":
@@ -399,9 +396,135 @@ def analyze_fixture(df, home, away, odds_1, odds_x, odds_2):
         }
     }
 
-# --- 6. SIDEBAR: COMPETITION SELECTOR ---
+# --- 6. AI ADVISOR ENGINE (OFFLINE SMART ENGINE + GROQ / GEMINI) ---
+def build_match_context(res, h2h_df, comp_label):
+    raw = res["_raw"]
+    h5, a5 = raw["h_last5"], raw["a_last5"]
+    h2h_txt = "No recent H2H found." if h2h_df.empty else h2h_df.to_string(index=False)
+
+    return f"""Competition: {comp_label}
+Match: {raw['home']} (Home) vs {raw['away']} (Away)
+Bookmaker Odds: Home(1)={res['1']}, Draw(X)={res['X']}, Away(2)={res['2']}
+Poisson Expected Goals: {raw['home']} {raw['exp_hg']:.2f} - {raw['exp_ag']:.2f} {raw['away']}
+Model Probabilities:
+- Home Win (1): {raw['p_1']*100:.1f}% (EV: {raw['ev']['1']*100:+.1f}%)
+- Draw (X): {raw['p_x']*100:.1f}% (EV: {raw['ev']['X']*100:+.1f}%)
+- Away Win (2): {raw['p_2']*100:.1f}% (EV: {raw['ev']['2']*100:+.1f}%)
+- Home or Draw (1X): {(raw['p_1']+raw['p_x'])*100:.1f}%
+- Away or Draw (X2): {(raw['p_2']+raw['p_x'])*100:.1f}%
+- Over 1.5 Goals: {raw['p_o15']*100:.1f}%
+- Over 2.5 Goals: {raw['p_o25']*100:.1f}% | Under 2.5 Goals: {(1-raw['p_o25'])*100:.1f}%
+- Over 3.5 Goals: {raw['p_o35']*100:.1f}% | Under 3.5 Goals: {(1-raw['p_o35'])*100:.1f}%
+- BTTS Yes (GG): {raw['p_btts']*100:.1f}% | BTTS No (NG): {(1-raw['p_btts'])*100:.1f}%
+- Most Likely Score: {res['Score']}
+- Model Top Tip: {res['Tip']} (Confidence: {res['Conf']}/10, Tag: {res['Category']})
+
+Home Last 5 (Home Only): Form={h5['form']}, GF={h5['gf']}, GA={h5['ga']}, PowerRank={h5['power']}, Over2.5={h5['o25']}%, BTTS={h5['btts']}%, Corners={h5['corners']}, ShotsOT={h5['shots_ot']}
+Away Last 5 (Away Only): Form={a5['form']}, GF={a5['gf']}, GA={a5['ga']}, PowerRank={a5['power']}, Over2.5={a5['o25']}%, BTTS={a5['btts']}%, Corners={a5['corners']}, ShotsOT={a5['shots_ot']}
+
+Recent H2H:
+{h2h_txt}"""
+
+def builtin_smart_advisor(res, question):
+    raw = res["_raw"]
+    markets = {
+        f"{raw['home']} Win (1)": raw["p_1"],
+        "Draw (X)": raw["p_x"],
+        f"{raw['away']} Win (2)": raw["p_2"],
+        f"{raw['home']} or Draw (1X)": raw["p_1"] + raw["p_x"],
+        f"{raw['away']} or Draw (X2)": raw["p_2"] + raw["p_x"],
+        "Over 1.5 Goals": raw["p_o15"],
+        "Over 2.5 Goals": raw["p_o25"],
+        "Under 2.5 Goals": 1 - raw["p_o25"],
+        "Under 3.5 Goals": 1 - raw["p_o35"],
+        "BTTS Yes (GG)": raw["p_btts"],
+        "BTTS No (NG)": 1 - raw["p_btts"],
+    }
+    ranked = sorted(markets.items(), key=lambda x: x[1], reverse=True)
+    safest_1, p1 = ranked[0]
+    safest_2, p2 = ranked[1]
+    safest_3, p3 = ranked[2]
+
+    best_ev_side = max(raw["ev"], key=raw["ev"].get)
+    best_ev_val = raw["ev"][best_ev_side]
+    q = question.lower()
+
+    if "value" in q or "odds" in q or "high" in q:
+        focus = f"💎 **Best Value Pick:** `{best_ev_side}` ({best_ev_val*100:+.1f}% EV against your odds)." if best_ev_val > 0 else "⚠️ None of the 1X2 odds show positive value (+EV) right now—bookie margins are tight."
+    elif "goal" in q or "over" in q or "under" in q or "btts" in q or "gg" in q:
+        goal_markets = [(k, v) for k, v in ranked if any(w in k for w in ["Goals", "BTTS"])]
+        focus = f"⚽ **Best Goals Option:** **{goal_markets[0][0]}** ({goal_markets[0][1]*100:.1f}% probability) | Expected total goals: `{raw['exp_hg'] + raw['exp_ag']:.2f}`."
+    else:
+        focus = f"🎯 **Top Overall Recommendation:** **{safest_1}** ({p1*100:.1f}% probability)."
+
+    return (
+        f"**Built-in Smart Analysis for {res['Match']}**\n\n"
+        f"{focus}\n\n"
+        f"**Top 3 Highest-Probability Markets:**\n"
+        f"1. **{safest_1}** — `{p1*100:.1f}%`\n"
+        f"2. **{safest_2}** — `{p2*100:.1f}%`\n"
+        f"3. **{safest_3}** — `{p3*100:.1f}%`\n\n"
+        f"**Value Check:** Best 1X2 edge is `{best_ev_side}` (`{best_ev_val*100:+.1f}% EV`) | **Projected Score:** `{res['Score']}`\n\n"
+        f"*(Tip: Paste a free Groq or Gemini API key in the sidebar to chat naturally with a live LLM!)*"
+    )
+
+def ask_live_ai(provider, api_key, match_context, chat_history, user_question):
+    system_prompt = (
+        "You are an expert, disciplined football betting analyst inside the user's personal prediction app. "
+        "Base your answer strictly on the match stats, Poisson probabilities, Power Ranks, H2H, and bookmaker odds provided below. "
+        "Never invent stats or injuries not in the data. Always recommend the single best option (and an accumulator-safe backup if helpful), "
+        "clearly explain why using the numbers, and state the main risk. Keep answers crisp and practical.\n\n"
+        f"--- CURRENT MATCH DATA ---\n{match_context}"
+    )
+
+    if provider == "Groq (Free Llama 3.3 70B)":
+        msgs = [{"role": "system", "content": system_prompt}]
+        for m in chat_history[-6:]:
+            msgs.append({"role": m["role"], "content": m["content"]})
+        msgs.append({"role": "user", "content": user_question})
+        try:
+            r = requests.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json={"model": "llama-3.3-70b-versatile", "messages": msgs, "temperature": 0.3},
+                timeout=25,
+            )
+            if r.status_code == 200:
+                return r.json()["choices"][0]["message"]["content"]
+            return f"Groq API Error ({r.status_code}): {r.text}"
+        except Exception as e:
+            return f"Connection error: {e}"
+
+    elif provider == "Google Gemini (Free Gemini 2.5 Flash)":
+        contents = []
+        for m in chat_history[-6:]:
+            role = "user" if m["role"] == "user" else "model"
+            contents.append({"role": role, "parts": [{"text": m["content"]}]})
+        contents.append({"role": "user", "parts": [{"text": user_question}]})
+        try:
+            r = requests.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}",
+                headers={"Content-Type": "application/json"},
+                json={
+                    "system_instruction": {"parts": [{"text": system_prompt}]},
+                    "contents": contents,
+                    "generationConfig": {"temperature": 0.3},
+                },
+                timeout=25,
+            )
+            if r.status_code == 200:
+                return r.json()["candidates"][0]["content"]["parts"][0]["text"]
+            return f"Gemini API Error ({r.status_code}): {r.text}"
+        except Exception as e:
+            return f"Connection error: {e}"
+
+    return "Unknown AI provider."
+
+# --- 7. SESSION STATE & SIDEBAR ---
 if "daily_list" not in st.session_state:
     st.session_state.daily_list = []
+if "ai_messages" not in st.session_state:
+    st.session_state.ai_messages = []
 
 st.sidebar.header("🌍 Select Competition")
 mode = st.sidebar.radio(
@@ -451,11 +574,26 @@ else:
         else:
             st.sidebar.warning("No competition matched.")
     else:
-        st.sidebar.info("Get a free key (1,000 req/day, no card) at goal-api.com for CAF Champions League, NPFL, and 1,000+ leagues.")
+        st.sidebar.info("Get a free key (1,000 req/day, no card) at goal-api.com.")
 
-# --- 7. MAIN DASHBOARD ---
-st.title("🌍 My World Football Predictor")
-tab_analyze, tab_daily, tab_tracker = st.tabs(["🔍 Match Analyzer", "🔥 Daily Tips & Categories", "📒 My Bet Tracker"])
+st.sidebar.divider()
+st.sidebar.header("🤖 AI Space Settings")
+ai_provider = st.sidebar.selectbox(
+    "AI Engine",
+    ["Built-in Smart Advisor (No Key)", "Groq (Free Llama 3.3 70B)", "Google Gemini (Free Gemini 2.5 Flash)"],
+)
+ai_api_key = ""
+if ai_provider != "Built-in Smart Advisor (No Key)":
+    ai_api_key = st.sidebar.text_input("Paste Free AI Key", type="password")
+    if not ai_api_key:
+        st.sidebar.caption("Get a free key (no card) at console.groq.com or aistudio.google.com")
+
+# --- 8. MAIN DASHBOARD ---
+st.title("🌍 My World Football Predictor + AI")
+tab_analyze, tab_ai, tab_daily, tab_tracker = st.tabs(["🔍 Match Analyzer", "🤖 AI Space", "🔥 Daily Tips & Categories", "📒 My Bet Tracker"])
+
+current_res = None
+current_h2h = pd.DataFrame()
 
 with tab_analyze:
     if df_league.empty:
@@ -481,7 +619,7 @@ with tab_analyze:
         home_team = c1.selectbox("Home Team", teams, index=default_h_idx)
         away_team = c2.selectbox("Away Team", teams, index=default_a_idx)
 
-        st.markdown("**Enter Your Bookmaker Odds (to check +EV Value & Bankers):**")
+        st.markdown("**Enter Bookmaker Odds (to check +EV Value & Bankers):**")
         oc1, oc2, oc3, oc4 = st.columns([1, 1, 1, 1.5])
         o1 = oc1.number_input("Home (1)", min_value=1.01, value=1.85, step=0.05)
         ox = oc2.number_input("Draw (X)", min_value=1.01, value=3.50, step=0.05)
@@ -493,6 +631,8 @@ with tab_analyze:
         else:
             res = analyze_fixture(df_league, home_team, away_team, o1, ox, o2)
             raw = res["_raw"]
+            current_res = res
+            current_h2h = get_h2h(df_league, home_team, away_team)
 
             st.divider()
             m1, m2, m3, m4, m5 = st.columns(5)
@@ -538,10 +678,53 @@ with tab_analyze:
             })
             st.dataframe(ev_df, hide_index=True, use_container_width=True)
 
-            h2h_df = get_h2h(df_league, home_team, away_team)
-            if not h2h_df.empty:
+            if not current_h2h.empty:
                 st.markdown("**🤝 Head-to-Head (Recent Meetings)**")
-                st.dataframe(h2h_df, hide_index=True, use_container_width=True)
+                st.dataframe(current_h2h, hide_index=True, use_container_width=True)
+
+with tab_ai:
+    st.subheader("🤖 AI Betting Advisor Space")
+    if current_res is None:
+        st.info("Pick a competition and two different teams in **Match Analyzer** first, then come here to ask the AI.")
+    else:
+        st.success(f"**Active Match:** {current_res['Match']} ({selected_comp_label}) | **Odds:** 1=`{current_res['1']}` X=`{current_res['X']}` 2=`{current_res['2']}`")
+        match_ctx = build_match_context(current_res, current_h2h, selected_comp_label)
+
+        # 1-Click Quick Prompts (Great on Phone!)
+        st.markdown("**Quick Questions:**")
+        q_cols = st.columns(4)
+        quick_q = None
+        if q_cols[0].button("🎯 Best Overall Pick", use_container_width=True):
+            quick_q = "Select the single best betting option for this match and explain why."
+        if q_cols[1].button("🔒 Safest for Accumulator", use_container_width=True):
+            quick_q = "What is the safest, lowest-risk option for an accumulator ticket?"
+        if q_cols[2].button("💎 Best Value (+EV)", use_container_width=True):
+            quick_q = "Which option gives the best value against the bookmaker odds I entered?"
+        if q_cols[3].button("⚽ Goals / BTTS Verdict", use_container_width=True):
+            quick_q = "Should I bet Over/Under goals or BTTS (GG/NG) here? Pick the best goal market."
+
+        with st.form("ai_chat_form", clear_on_submit=True):
+            typed_q = st.text_input("Or ask your own question:", placeholder="e.g. Is Home Win risky? Should I play 1X + Over 1.5 instead?")
+            submitted = st.form_submit_button("Ask AI 🚀")
+
+        user_prompt = quick_q if quick_q else (typed_q.strip() if submitted and typed_q.strip() else None)
+
+        if user_prompt:
+            st.session_state.ai_messages.append({"role": "user", "content": user_prompt})
+            with st.spinner("Analyzing match data..."):
+                if ai_provider == "Built-in Smart Advisor (No Key)" or not ai_api_key:
+                    reply = builtin_smart_advisor(current_res, user_prompt)
+                else:
+                    reply = ask_live_ai(ai_provider, ai_api_key, match_ctx, st.session_state.ai_messages[:-1], user_prompt)
+            st.session_state.ai_messages.append({"role": "assistant", "content": reply})
+
+        for msg in reversed(st.session_state.ai_messages):
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+
+        if st.session_state.ai_messages and st.button("🧹 Clear AI Chat"):
+            st.session_state.ai_messages = []
+            st.rerun()
 
 with tab_daily:
     st.subheader("🔥 Today's Curated Tips")
