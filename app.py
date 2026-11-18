@@ -8,7 +8,19 @@ from scipy.stats import poisson
 
 st.set_page_config(page_title="World Football Predictor", page_icon="🌍", layout="wide")
 
-# --- 1. BUILT-IN GLOBAL LEAGUES (NO API KEY NEEDED) ---
+# --- 1. COMPETITIONS CATALOG ---
+ESPN_CUPS_AND_INTL = {
+    "🏆 UEFA Champions League": "uefa.champions",
+    "🟠 UEFA Europa League": "uefa.europa",
+    "🟢 UEFA Conference League": "uefa.europa.conf",
+    "🇪🇺 UEFA Nations League": "uefa.nations",
+    "🌍 FIFA World Cup": "fifa.world",
+    "🌍 CAF Africa Cup of Nations (AFCON)": "caf.nations",
+    "🌏 AFC Champions League Elite": "afc.champions",
+    "🌎 CONMEBOL Copa Libertadores": "conmebol.libertadores",
+    "🌎 CONMEBOL Copa Sudamericana": "conmebol.sudamericana",
+}
+
 MAIN_CSV_LEAGUES = {
     "🇬🇧 England - Premier League": "E0",
     "🇬🇧 England - Championship": "E1",
@@ -49,18 +61,6 @@ WORLD_CSV_LEAGUES = {
     "🇷🇺 Russia - Premier League": "RUS",
     "🇸🇪 Sweden - Allsvenskan": "SWE",
     "🇨🇭 Switzerland - Super League": "SWZ",
-}
-
-FDO_COMPETITIONS = {
-    "🏆 UEFA Champions League": "CL",
-    "🌍 FIFA World Cup": "WC",
-    "🇪🇺 UEFA European Championship": "EC",
-    "🇧🇷 Brazil Serie A (Live API)": "BSA",
-    "🇬🇧 Premier League (Live API)": "PL",
-    "🇪🇸 La Liga (Live API)": "PD",
-    "🇩🇪 Bundesliga (Live API)": "BL1",
-    "🇮🇹 Serie A (Live API)": "SA",
-    "🇫🇷 Ligue 1 (Live API)": "FL1",
 }
 
 # --- 2. DATABASE FOR PERSONAL BET TRACKING ---
@@ -110,7 +110,60 @@ def load_bets():
 
 init_db()
 
-# --- 3. DATA LOADERS (CSV + WORLD APIs) ---
+# --- 3. DATA LOADERS (ESPN PUBLIC + CSV + GOAL API) ---
+@st.cache_data(ttl=1800)
+def load_espn_competition(slug):
+    base = f"https://site.api.espn.com/apis/site/v2/sports/soccer/{slug}/scoreboard"
+    date_windows = [None, "20260801-20270131", "20260101-20260731", "20250801-20251231"]
+    seen_ids = set()
+    finished, upcoming = [], []
+    headers = {"User-Agent": "Mozilla/5.0"}
+
+    for win in date_windows:
+        url = base if win is None else f"{base}?dates={win}&limit=400"
+        try:
+            r = requests.get(url, headers=headers, timeout=12)
+            if r.status_code != 200:
+                continue
+            for ev in r.json().get("events", []):
+                eid = ev.get("id")
+                if eid in seen_ids:
+                    continue
+                seen_ids.add(eid)
+                comps = ev.get("competitions") or []
+                if not comps:
+                    continue
+                comp = comps[0]
+                competitors = comp.get("competitors") or []
+                home_c = next((c for c in competitors if c.get("homeAway") == "home"), None)
+                away_c = next((c for c in competitors if c.get("homeAway") == "away"), None)
+                if not home_c or not away_c:
+                    continue
+                h_name = (home_c.get("team") or {}).get("displayName")
+                a_name = (away_c.get("team") or {}).get("displayName")
+                if not h_name or not a_name:
+                    continue
+                dt = (ev.get("date") or "")[:10]
+                state = ((comp.get("status") or {}).get("type") or {}).get("state", "")
+                if state == "post":
+                    try:
+                        hg = int(float(home_c.get("score", 0)))
+                        ag = int(float(away_c.get("score", 0)))
+                        finished.append({"Date": dt, "HomeTeam": h_name, "AwayTeam": a_name, "FTHG": hg, "FTAG": ag})
+                    except (ValueError, TypeError):
+                        pass
+                elif state == "pre":
+                    upcoming.append((dt, h_name, a_name))
+        except Exception:
+            pass
+
+    df = pd.DataFrame(finished)
+    if not df.empty:
+        df["DateParsed"] = pd.to_datetime(df["Date"], errors="coerce")
+        df = df.sort_values("DateParsed").reset_index(drop=True)
+    upcoming = sorted(set(upcoming), key=lambda x: x[0])[:20]
+    return df, upcoming
+
 @st.cache_data(ttl=3600)
 def load_main_csv_league(code):
     frames = []
@@ -146,41 +199,12 @@ def load_world_csv_league(code):
     except Exception:
         return pd.DataFrame(), []
 
-@st.cache_data(ttl=1800)
-def load_fdo_competition(code, api_key):
-    url = f"https://api.football-data.org/v4/competitions/{code}/matches"
-    try:
-        r = requests.get(url, headers={"X-Auth-Token": api_key}, timeout=15)
-        if r.status_code != 200:
-            return pd.DataFrame(), []
-        matches = r.json().get("matches", [])
-        finished, upcoming = [], []
-        for m in matches:
-            h = (m.get("homeTeam") or {}).get("name")
-            a = (m.get("awayTeam") or {}).get("name")
-            if not h or not a:
-                continue
-            dt = (m.get("utcDate") or "")[:10]
-            if m.get("status") == "FINISHED":
-                ft = (m.get("score") or {}).get("fullTime") or {}
-                if ft.get("home") is not None and ft.get("away") is not None:
-                    finished.append({"Date": dt, "HomeTeam": h, "AwayTeam": a, "FTHG": int(ft["home"]), "FTAG": int(ft["away"])})
-            elif m.get("status") in ("SCHEDULED", "TIMED"):
-                upcoming.append((dt, h, a))
-        df = pd.DataFrame(finished)
-        if not df.empty:
-            df["DateParsed"] = pd.to_datetime(df["Date"], errors="coerce")
-            df = df.sort_values("DateParsed").reset_index(drop=True)
-        return df, upcoming[:15]
-    except Exception:
-        return pd.DataFrame(), []
-
 @st.cache_data(ttl=3600)
 def search_goal_api_leagues(query, api_key):
     try:
         r = requests.get(
             "https://api.goal-api.com/v1/leagues",
-            params={"search": query},
+            params={"search": query, "limit": 50},
             headers={"Authorization": f"Bearer {api_key}"},
             timeout=15,
         )
@@ -195,6 +219,7 @@ def load_goal_api_fixtures(league_id, api_key):
     try:
         r = requests.get(
             f"https://api.goal-api.com/v1/leagues/{league_id}/fixtures",
+            params={"limit": 300},
             headers={"Authorization": f"Bearer {api_key}"},
             timeout=15,
         )
@@ -203,8 +228,7 @@ def load_goal_api_fixtures(league_id, api_key):
         items = r.json().get("data", [])
         finished, upcoming = [], []
         for m in items:
-            h = m.get("homeTeamName")
-            a = m.get("awayTeamName")
+            h, a = m.get("homeTeamName"), m.get("awayTeamName")
             if not h or not a:
                 continue
             dt = (m.get("kickoffUtc") or "")[:10]
@@ -221,7 +245,7 @@ def load_goal_api_fixtures(league_id, api_key):
         if not df.empty:
             df["DateParsed"] = pd.to_datetime(df["Date"], errors="coerce")
             df = df.sort_values("DateParsed").reset_index(drop=True)
-        return df, upcoming[:15]
+        return df, upcoming[:20]
     except Exception:
         return pd.DataFrame(), []
 
@@ -296,6 +320,12 @@ def analyze_fixture(df, home, away, odds_1, odds_x, odds_2):
     h_last5 = get_team_metrics(df, home, "home", last_n=5)
     a_last5 = get_team_metrics(df, away, "away", last_n=5)
 
+    # Fallback to overall form if a cup team hasn't played home/away yet
+    if h_last5["form"] == "-" and h_all["form"] != "-":
+        h_last5 = h_all
+    if a_last5["form"] == "-" and a_all["form"] != "-":
+        a_last5 = a_all
+
     avg_hg = max(df["FTHG"].mean(), 0.5)
     avg_ag = max(df["FTAG"].mean(), 0.5)
 
@@ -369,17 +399,17 @@ def analyze_fixture(df, home, away, odds_1, odds_x, odds_2):
         }
     }
 
-# --- 6. SIDEBAR: CHOOSE DATA SOURCE (EUROPE / WORLD / UEFA / CAF / AFC / FIFA) ---
+# --- 6. SIDEBAR: COMPETITION SELECTOR ---
 if "daily_list" not in st.session_state:
     st.session_state.daily_list = []
 
-st.sidebar.header("🌍 Competition Source")
+st.sidebar.header("🌍 Select Competition")
 mode = st.sidebar.radio(
-    "Choose Database",
+    "Category",
     [
-        "Built-in 38 Global Leagues (Free, No Key)",
-        "UEFA & FIFA Cups (football-data.org Key)",
-        "All 1,000+ World Competitions (GOAL API Key)",
+        "🏆 UEFA, CAF, AFC & FIFA Cups (Free, No Key)",
+        "⚽ 38 Global Domestic Leagues (Free, No Key)",
+        "🔎 All 1,000+ Competitions (Free GOAL API Key)",
     ],
 )
 
@@ -387,7 +417,15 @@ df_league = pd.DataFrame()
 upcoming_fixtures = []
 selected_comp_label = ""
 
-if mode == "Built-in 38 Global Leagues (Free, No Key)":
+if mode == "🏆 UEFA, CAF, AFC & FIFA Cups (Free, No Key)":
+    selected_comp_label = st.sidebar.selectbox("Select Tournament", list(ESPN_CUPS_AND_INTL.keys()))
+    custom_slug = st.sidebar.text_input("Or type any ESPN slug (optional)", placeholder="e.g. eng.1, esp.1, usa.1")
+    slug = custom_slug.strip() if custom_slug.strip() else ESPN_CUPS_AND_INTL[selected_comp_label]
+    if custom_slug.strip():
+        selected_comp_label = f"Custom ({slug})"
+    df_league, upcoming_fixtures = load_espn_competition(slug)
+
+elif mode == "⚽ 38 Global Domestic Leagues (Free, No Key)":
     all_builtin = {**MAIN_CSV_LEAGUES, **WORLD_CSV_LEAGUES}
     selected_comp_label = st.sidebar.selectbox("Select League", list(all_builtin.keys()))
     code = all_builtin[selected_comp_label]
@@ -396,17 +434,14 @@ if mode == "Built-in 38 Global Leagues (Free, No Key)":
     else:
         df_league, upcoming_fixtures = load_world_csv_league(code)
 
-elif mode == "UEFA & FIFA Cups (football-data.org Key)":
-    fdo_key = st.sidebar.text_input("football-data.org Token (Free)", type="password")
-    selected_comp_label = st.sidebar.selectbox("Select Competition", list(FDO_COMPETITIONS.keys()))
-    if fdo_key:
-        df_league, upcoming_fixtures = load_fdo_competition(FDO_COMPETITIONS[selected_comp_label], fdo_key)
-    else:
-        st.sidebar.info("Get a free token at football-data.org/client/register")
-
 else:
     goal_key = st.sidebar.text_input("GOAL API Key (Free at goal-api.com)", type="password")
-    search_q = st.sidebar.text_input("Search ANY Competition", value="CAF Champions League")
+    quick_pick = st.sidebar.selectbox(
+        "Quick Search Presets",
+        ["Custom Search", "CAF Champions League", "CAF Confederation Cup", "NPFL", "AFC Champions League", "FIFA Club World Cup", "Saudi Pro League"],
+    )
+    default_q = "" if quick_pick == "Custom Search" else quick_pick
+    search_q = st.sidebar.text_input("Search ANY of 1,000+ Leagues", value=default_q, placeholder="Type league or cup name...")
     if goal_key and search_q:
         found = search_goal_api_leagues(search_q, goal_key)
         if found:
@@ -414,9 +449,9 @@ else:
             selected_comp_label = st.sidebar.selectbox("Pick Competition", list(options.keys()))
             df_league, upcoming_fixtures = load_goal_api_fixtures(options[selected_comp_label], goal_key)
         else:
-            st.sidebar.warning("No competition matched. Try 'NPFL', 'AFC', 'UEFA', 'World Cup', or 'AFCON'.")
+            st.sidebar.warning("No competition matched.")
     else:
-        st.sidebar.info("Get a free key (1,000 req/day, no card) at goal-api.com")
+        st.sidebar.info("Get a free key (1,000 req/day, no card) at goal-api.com for CAF Champions League, NPFL, and 1,000+ leagues.")
 
 # --- 7. MAIN DASHBOARD ---
 st.title("🌍 My World Football Predictor")
@@ -424,28 +459,29 @@ tab_analyze, tab_daily, tab_tracker = st.tabs(["🔍 Match Analyzer", "🔥 Dail
 
 with tab_analyze:
     if df_league.empty:
-        st.info("Select a competition in the left sidebar (or enter your free API key for UEFA/CAF/AFC/FIFA cups) to start predicting.")
+        st.info("Select a competition in the left sidebar to load teams and upcoming matches.")
     else:
-        st.caption(f"Loaded **{len(df_league)}** historical matches for **{selected_comp_label}**")
+        st.caption(f"Loaded **{len(df_league)}** matches for **{selected_comp_label}**")
         teams = sorted(set(df_league["HomeTeam"].unique()) | set(df_league["AwayTeam"].unique()))
 
-        # Optional quick-fill from upcoming fixtures if using API mode
         default_h_idx, default_a_idx = 0, min(1, len(teams) - 1)
         if upcoming_fixtures:
             fix_labels = ["-- Manual Pick --"] + [f"{dt} | {h} vs {a}" for dt, h, a in upcoming_fixtures]
-            picked_fix = st.selectbox("📅 Upcoming Fixtures Found (Optional Quick-Select)", fix_labels)
+            picked_fix = st.selectbox("📅 Upcoming Fixtures Found (Click to Auto-Select)", fix_labels)
             if picked_fix != "-- Manual Pick --":
                 idx = fix_labels.index(picked_fix) - 1
                 _, fh, fa = upcoming_fixtures[idx]
                 if fh in teams and fa in teams:
                     default_h_idx = teams.index(fh)
                     default_a_idx = teams.index(fa)
+                else:
+                    st.warning(f"One of these teams ({fh} or {fa}) has no finished match history in this tournament yet.")
 
         c1, c2 = st.columns(2)
         home_team = c1.selectbox("Home Team", teams, index=default_h_idx)
         away_team = c2.selectbox("Away Team", teams, index=default_a_idx)
 
-        st.markdown("**Enter Bookmaker Odds (to check +EV Value & Bankers):**")
+        st.markdown("**Enter Your Bookmaker Odds (to check +EV Value & Bankers):**")
         oc1, oc2, oc3, oc4 = st.columns([1, 1, 1, 1.5])
         o1 = oc1.number_input("Home (1)", min_value=1.01, value=1.85, step=0.05)
         ox = oc2.number_input("Draw (X)", min_value=1.01, value=3.50, step=0.05)
