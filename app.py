@@ -468,8 +468,7 @@ def builtin_smart_advisor(res, question):
         f"*(Tip: Paste a free Groq or Gemini API key in the sidebar to chat naturally with a live LLM!)*"
     )
 
-def ask_live_ai(provider, api_key, match_context, chat_history, user_question):
-    system_prompt = (
+def ask_live_aijson={"model": "openai/gpt-oss-120b", "messages": msgs, "temperature": 0.3},
         "You are an expert, disciplined football betting analyst inside the user's personal prediction app. "
         "Base your answer strictly on the match stats, Poisson probabilities, Power Ranks, H2H, and bookmaker odds provided below. "
         "Never invent stats or injuries not in the data. Always recommend the single best option (and an accumulator-safe backup if helpful), "
@@ -503,9 +502,7 @@ def ask_live_ai(provider, api_key, match_context, chat_history, user_question):
         contents.append({"role": "user", "parts": [{"text": user_question}]})
         try:
             r = requests.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}",
-                headers={"Content-Type": "application/json"},
-                json={
+                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={api_key}",
                     "system_instruction": {"parts": [{"text": system_prompt}]},
                     "contents": contents,
                     "generationConfig": {"temperature": 0.3},
