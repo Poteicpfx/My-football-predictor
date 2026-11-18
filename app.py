@@ -1,22 +1,69 @@
 import sqlite3
 from datetime import datetime
+import requests
 import streamlit as st
 import pandas as pd
 import numpy as np
 from scipy.stats import poisson
 
-st.set_page_config(page_title="My Football Edge", page_icon="⚽", layout="wide")
+st.set_page_config(page_title="World Football Predictor", page_icon="🌍", layout="wide")
 
-LEAGUES = {
-    "Premier League (England)": "E0",
-    "Championship (England)": "E1",
-    "La Liga (Spain)": "SP1",
-    "Bundesliga (Germany)": "D1",
-    "Serie A (Italy)": "I1",
-    "Ligue 1 (France)": "F1",
+# --- 1. BUILT-IN GLOBAL LEAGUES (NO API KEY NEEDED) ---
+MAIN_CSV_LEAGUES = {
+    "🇬🇧 England - Premier League": "E0",
+    "🇬🇧 England - Championship": "E1",
+    "🇬🇧 England - League 1": "E2",
+    "🇬🇧 England - League 2": "E3",
+    "🇬🇧 England - National League": "EC",
+    "🏴󠁧󠁢󠁳󠁣󠁴󠁿 Scotland - Premiership": "SC0",
+    "🏴󠁧󠁢󠁳󠁣󠁴󠁿 Scotland - Championship": "SC1",
+    "🇪🇸 Spain - La Liga": "SP1",
+    "🇪🇸 Spain - Segunda": "SP2",
+    "🇩🇪 Germany - Bundesliga": "D1",
+    "🇩🇪 Germany - 2. Bundesliga": "D2",
+    "🇮🇹 Italy - Serie A": "I1",
+    "🇮🇹 Italy - Serie B": "I2",
+    "🇫🇷 France - Ligue 1": "F1",
+    "🇫🇷 France - Ligue 2": "F2",
+    "🇳🇱 Netherlands - Eredivisie": "N1",
+    "🇧🇪 Belgium - Pro League": "B1",
+    "🇵🇹 Portugal - Liga Portugal": "P1",
+    "🇹🇷 Turkey - Super Lig": "T1",
+    "🇬🇷 Greece - Super League": "G1",
 }
 
-# --- 1. DATABASE FOR PERSONAL BET TRACKING ---
+WORLD_CSV_LEAGUES = {
+    "🇦🇷 Argentina - Primera Division": "ARG",
+    "🇧🇷 Brazil - Serie A": "BRA",
+    "🇺🇸 USA - MLS": "USA",
+    "🇲🇽 Mexico - Liga MX": "MEX",
+    "🇯🇵 Japan - J-League": "JPN",
+    "🇨🇳 China - Super League": "CHN",
+    "🇦🇹 Austria - Bundesliga": "AUT",
+    "🇩🇰 Denmark - Superliga": "DNK",
+    "🇫🇮 Finland - Veikkausliiga": "FIN",
+    "🇮🇪 Ireland - Premier Division": "IRL",
+    "🇳🇴 Norway - Eliteserien": "NOR",
+    "🇵🇱 Poland - Ekstraklasa": "POL",
+    "🇷🇴 Romania - Liga 1": "ROU",
+    "🇷🇺 Russia - Premier League": "RUS",
+    "🇸🇪 Sweden - Allsvenskan": "SWE",
+    "🇨🇭 Switzerland - Super League": "SWZ",
+}
+
+FDO_COMPETITIONS = {
+    "🏆 UEFA Champions League": "CL",
+    "🌍 FIFA World Cup": "WC",
+    "🇪🇺 UEFA European Championship": "EC",
+    "🇧🇷 Brazil Serie A (Live API)": "BSA",
+    "🇬🇧 Premier League (Live API)": "PL",
+    "🇪🇸 La Liga (Live API)": "PD",
+    "🇩🇪 Bundesliga (Live API)": "BL1",
+    "🇮🇹 Serie A (Live API)": "SA",
+    "🇫🇷 Ligue 1 (Live API)": "FL1",
+}
+
+# --- 2. DATABASE FOR PERSONAL BET TRACKING ---
 def init_db():
     conn = sqlite3.connect("my_bets.db")
     conn.execute("""
@@ -63,31 +110,122 @@ def load_bets():
 
 init_db()
 
-# --- 2. LIVE HISTORICAL DATA LOADER (2025/26 + 2026/27) ---
+# --- 3. DATA LOADERS (CSV + WORLD APIs) ---
 @st.cache_data(ttl=3600)
-def load_league_data(code):
+def load_main_csv_league(code):
     frames = []
     for season in ["2526", "2627"]:
         url = f"https://www.football-data.co.uk/mmz4281/{season}/{code}.csv"
         try:
             df = pd.read_csv(url, encoding="latin1")
             df = df.dropna(subset=["HomeTeam", "AwayTeam", "FTHG", "FTAG"])
-            df["Season"] = season
             frames.append(df)
         except Exception:
             pass
-
     if not frames:
-        return pd.DataFrame()
-
+        return pd.DataFrame(), []
     full = pd.concat(frames, ignore_index=True)
     full["FTHG"] = full["FTHG"].astype(int)
     full["FTAG"] = full["FTAG"].astype(int)
     full["DateParsed"] = pd.to_datetime(full["Date"], dayfirst=True, errors="coerce")
     full = full.sort_values("DateParsed").reset_index(drop=True)
-    return full
+    return full, []
 
-# --- 3. STATS, POWER RANK & H2H ---
+@st.cache_data(ttl=3600)
+def load_world_csv_league(code):
+    url = f"https://www.football-data.co.uk/new/{code}.csv"
+    try:
+        df = pd.read_csv(url, encoding="latin1")
+        df = df.rename(columns={"Home": "HomeTeam", "Away": "AwayTeam", "HG": "FTHG", "AG": "FTAG"})
+        df = df.dropna(subset=["HomeTeam", "AwayTeam", "FTHG", "FTAG"]).tail(800)
+        df["FTHG"] = df["FTHG"].astype(int)
+        df["FTAG"] = df["FTAG"].astype(int)
+        df["DateParsed"] = pd.to_datetime(df["Date"], dayfirst=True, errors="coerce")
+        df = df.sort_values("DateParsed").reset_index(drop=True)
+        return df, []
+    except Exception:
+        return pd.DataFrame(), []
+
+@st.cache_data(ttl=1800)
+def load_fdo_competition(code, api_key):
+    url = f"https://api.football-data.org/v4/competitions/{code}/matches"
+    try:
+        r = requests.get(url, headers={"X-Auth-Token": api_key}, timeout=15)
+        if r.status_code != 200:
+            return pd.DataFrame(), []
+        matches = r.json().get("matches", [])
+        finished, upcoming = [], []
+        for m in matches:
+            h = (m.get("homeTeam") or {}).get("name")
+            a = (m.get("awayTeam") or {}).get("name")
+            if not h or not a:
+                continue
+            dt = (m.get("utcDate") or "")[:10]
+            if m.get("status") == "FINISHED":
+                ft = (m.get("score") or {}).get("fullTime") or {}
+                if ft.get("home") is not None and ft.get("away") is not None:
+                    finished.append({"Date": dt, "HomeTeam": h, "AwayTeam": a, "FTHG": int(ft["home"]), "FTAG": int(ft["away"])})
+            elif m.get("status") in ("SCHEDULED", "TIMED"):
+                upcoming.append((dt, h, a))
+        df = pd.DataFrame(finished)
+        if not df.empty:
+            df["DateParsed"] = pd.to_datetime(df["Date"], errors="coerce")
+            df = df.sort_values("DateParsed").reset_index(drop=True)
+        return df, upcoming[:15]
+    except Exception:
+        return pd.DataFrame(), []
+
+@st.cache_data(ttl=3600)
+def search_goal_api_leagues(query, api_key):
+    try:
+        r = requests.get(
+            "https://api.goal-api.com/v1/leagues",
+            params={"search": query},
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=15,
+        )
+        if r.status_code != 200:
+            return []
+        return r.json().get("data", [])
+    except Exception:
+        return []
+
+@st.cache_data(ttl=1800)
+def load_goal_api_fixtures(league_id, api_key):
+    try:
+        r = requests.get(
+            f"https://api.goal-api.com/v1/leagues/{league_id}/fixtures",
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=15,
+        )
+        if r.status_code != 200:
+            return pd.DataFrame(), []
+        items = r.json().get("data", [])
+        finished, upcoming = [], []
+        for m in items:
+            h = m.get("homeTeamName")
+            a = m.get("awayTeamName")
+            if not h or not a:
+                continue
+            dt = (m.get("kickoffUtc") or "")[:10]
+            hs, as_ = m.get("homeTeamScore"), m.get("awayTeamScore")
+            status = str(m.get("matchStatus") or "").upper()
+            if hs is not None and as_ is not None and status in ("FINISHED", "FT", "AET", "PEN"):
+                try:
+                    finished.append({"Date": dt, "HomeTeam": h, "AwayTeam": a, "FTHG": int(float(hs)), "FTAG": int(float(as_))})
+                except ValueError:
+                    pass
+            elif status in ("SCHEDULED", "NOT_STARTED", "NS", "TIMED", "UPCOMING"):
+                upcoming.append((dt, h, a))
+        df = pd.DataFrame(finished)
+        if not df.empty:
+            df["DateParsed"] = pd.to_datetime(df["Date"], errors="coerce")
+            df = df.sort_values("DateParsed").reset_index(drop=True)
+        return df, upcoming[:15]
+    except Exception:
+        return pd.DataFrame(), []
+
+# --- 4. STATS, POWER RANK & H2H ---
 def get_team_metrics(df, team, venue="all", last_n=5):
     if venue == "home":
         games = df[df["HomeTeam"] == team].tail(last_n)
@@ -151,21 +289,20 @@ def get_h2h(df, home, away, last_n=5):
         return pd.DataFrame()
     return h2h[["Date", "HomeTeam", "FTHG", "FTAG", "AwayTeam"]].iloc[::-1]
 
-# --- 4. POISSON PREDICTION ENGINE ---
+# --- 5. POISSON PREDICTION ENGINE ---
 def analyze_fixture(df, home, away, odds_1, odds_x, odds_2):
-    # Blend season-wide strength + recent venue form
     h_all = get_team_metrics(df, home, "all", last_n=15)
     a_all = get_team_metrics(df, away, "all", last_n=15)
     h_last5 = get_team_metrics(df, home, "home", last_n=5)
     a_last5 = get_team_metrics(df, away, "away", last_n=5)
 
-    avg_hg = df["FTHG"].mean()
-    avg_ag = df["FTAG"].mean()
+    avg_hg = max(df["FTHG"].mean(), 0.5)
+    avg_ag = max(df["FTAG"].mean(), 0.5)
 
-    h_att = (h_last5["gf"] * 0.65 + h_all["gf"] * 0.35) / max(avg_hg, 0.5)
-    a_def = (a_last5["ga"] * 0.65 + a_all["ga"] * 0.35) / max(avg_hg, 0.5)
-    a_att = (a_last5["gf"] * 0.65 + a_all["gf"] * 0.35) / max(avg_ag, 0.5)
-    h_def = (h_last5["ga"] * 0.65 + h_all["ga"] * 0.35) / max(avg_ag, 0.5)
+    h_att = (h_last5["gf"] * 0.65 + h_all["gf"] * 0.35) / avg_hg
+    a_def = (a_last5["ga"] * 0.65 + a_all["ga"] * 0.35) / avg_hg
+    a_att = (a_last5["gf"] * 0.65 + a_all["gf"] * 0.35) / avg_ag
+    h_def = (h_last5["ga"] * 0.65 + h_all["ga"] * 0.35) / avg_ag
 
     exp_hg = float(np.clip(h_att * a_def * avg_hg, 0.25, 4.0))
     exp_ag = float(np.clip(a_att * h_def * avg_ag, 0.25, 4.0))
@@ -201,13 +338,11 @@ def analyze_fixture(df, home, away, odds_1, odds_x, odds_2):
 
     confidence = int(np.clip(round((conf_prob - 0.25) / 0.60 * 9 + 1), 1, 10))
 
-    # Expected Value (+EV) against your bookmaker odds
     ev_1, ev_x, ev_2 = (p_1 * odds_1) - 1, (p_x * odds_x) - 1, (p_2 * odds_2) - 1
     ev_map = {"1": ev_1, "X": ev_x, "2": ev_2}
     best_ev_side = max(ev_map, key=ev_map.get)
     best_ev = ev_map[best_ev_side]
 
-    # Categories
     tags = []
     pick_odds = {"1": odds_1, "X": odds_x, "2": odds_2}.get(best_pick, 1.45)
     if confidence >= 8 and pick_odds <= 1.65:
@@ -230,33 +365,87 @@ def analyze_fixture(df, home, away, odds_1, odds_x, odds_2):
             "home": home, "away": away, "exp_hg": exp_hg, "exp_ag": exp_ag,
             "p_1": p_1, "p_x": p_x, "p_2": p_2,
             "p_o15": p_o15, "p_o25": p_o25, "p_o35": p_o35, "p_btts": p_btts,
-            "ev": ev_map, "h_last5": h_last5, "a_last5": a_last5, "matrix": matrix
+            "ev": ev_map, "h_last5": h_last5, "a_last5": a_last5,
         }
     }
 
-# --- 5. SESSION SLIP FOR DAILY MATCHES ---
+# --- 6. SIDEBAR: CHOOSE DATA SOURCE (EUROPE / WORLD / UEFA / CAF / AFC / FIFA) ---
 if "daily_list" not in st.session_state:
     st.session_state.daily_list = []
 
-# --- 6. APP UI ---
-st.title("⚽ My Personal Football Predictor")
+st.sidebar.header("🌍 Competition Source")
+mode = st.sidebar.radio(
+    "Choose Database",
+    [
+        "Built-in 38 Global Leagues (Free, No Key)",
+        "UEFA & FIFA Cups (football-data.org Key)",
+        "All 1,000+ World Competitions (GOAL API Key)",
+    ],
+)
 
+df_league = pd.DataFrame()
+upcoming_fixtures = []
+selected_comp_label = ""
+
+if mode == "Built-in 38 Global Leagues (Free, No Key)":
+    all_builtin = {**MAIN_CSV_LEAGUES, **WORLD_CSV_LEAGUES}
+    selected_comp_label = st.sidebar.selectbox("Select League", list(all_builtin.keys()))
+    code = all_builtin[selected_comp_label]
+    if selected_comp_label in MAIN_CSV_LEAGUES:
+        df_league, upcoming_fixtures = load_main_csv_league(code)
+    else:
+        df_league, upcoming_fixtures = load_world_csv_league(code)
+
+elif mode == "UEFA & FIFA Cups (football-data.org Key)":
+    fdo_key = st.sidebar.text_input("football-data.org Token (Free)", type="password")
+    selected_comp_label = st.sidebar.selectbox("Select Competition", list(FDO_COMPETITIONS.keys()))
+    if fdo_key:
+        df_league, upcoming_fixtures = load_fdo_competition(FDO_COMPETITIONS[selected_comp_label], fdo_key)
+    else:
+        st.sidebar.info("Get a free token at football-data.org/client/register")
+
+else:
+    goal_key = st.sidebar.text_input("GOAL API Key (Free at goal-api.com)", type="password")
+    search_q = st.sidebar.text_input("Search ANY Competition", value="CAF Champions League")
+    if goal_key and search_q:
+        found = search_goal_api_leagues(search_q, goal_key)
+        if found:
+            options = {f"{item.get('name')} ({(item.get('country') or {}).get('name', 'Intl')})": item.get("id") for item in found}
+            selected_comp_label = st.sidebar.selectbox("Pick Competition", list(options.keys()))
+            df_league, upcoming_fixtures = load_goal_api_fixtures(options[selected_comp_label], goal_key)
+        else:
+            st.sidebar.warning("No competition matched. Try 'NPFL', 'AFC', 'UEFA', 'World Cup', or 'AFCON'.")
+    else:
+        st.sidebar.info("Get a free key (1,000 req/day, no card) at goal-api.com")
+
+# --- 7. MAIN DASHBOARD ---
+st.title("🌍 My World Football Predictor")
 tab_analyze, tab_daily, tab_tracker = st.tabs(["🔍 Match Analyzer", "🔥 Daily Tips & Categories", "📒 My Bet Tracker"])
 
 with tab_analyze:
-    league_name = st.selectbox("Select League", list(LEAGUES.keys()))
-    league_code = LEAGUES[league_name]
-    df_league = load_league_data(league_code)
-
     if df_league.empty:
-        st.error("Could not fetch league data right now. Check your internet connection.")
+        st.info("Select a competition in the left sidebar (or enter your free API key for UEFA/CAF/AFC/FIFA cups) to start predicting.")
     else:
-        teams = sorted(df_league["HomeTeam"].unique())
-        c1, c2 = st.columns(2)
-        home_team = c1.selectbox("Home Team", teams, index=0)
-        away_team = c2.selectbox("Away Team", teams, index=min(1, len(teams)-1))
+        st.caption(f"Loaded **{len(df_league)}** historical matches for **{selected_comp_label}**")
+        teams = sorted(set(df_league["HomeTeam"].unique()) | set(df_league["AwayTeam"].unique()))
 
-        st.markdown("**Enter Your Bookmaker Odds (for +EV Value & Banker Check):**")
+        # Optional quick-fill from upcoming fixtures if using API mode
+        default_h_idx, default_a_idx = 0, min(1, len(teams) - 1)
+        if upcoming_fixtures:
+            fix_labels = ["-- Manual Pick --"] + [f"{dt} | {h} vs {a}" for dt, h, a in upcoming_fixtures]
+            picked_fix = st.selectbox("📅 Upcoming Fixtures Found (Optional Quick-Select)", fix_labels)
+            if picked_fix != "-- Manual Pick --":
+                idx = fix_labels.index(picked_fix) - 1
+                _, fh, fa = upcoming_fixtures[idx]
+                if fh in teams and fa in teams:
+                    default_h_idx = teams.index(fh)
+                    default_a_idx = teams.index(fa)
+
+        c1, c2 = st.columns(2)
+        home_team = c1.selectbox("Home Team", teams, index=default_h_idx)
+        away_team = c2.selectbox("Away Team", teams, index=default_a_idx)
+
+        st.markdown("**Enter Bookmaker Odds (to check +EV Value & Bankers):**")
         oc1, oc2, oc3, oc4 = st.columns([1, 1, 1, 1.5])
         o1 = oc1.number_input("Home (1)", min_value=1.01, value=1.85, step=0.05)
         ox = oc2.number_input("Draw (X)", min_value=1.01, value=3.50, step=0.05)
@@ -269,7 +458,6 @@ with tab_analyze:
             res = analyze_fixture(df_league, home_team, away_team, o1, ox, o2)
             raw = res["_raw"]
 
-            # Top Summary Banner (SoccerVital Style)
             st.divider()
             m1, m2, m3, m4, m5 = st.columns(5)
             m1.metric("Confidence", f"{res['Conf']}/10", res["Tip"])
@@ -280,34 +468,31 @@ with tab_analyze:
 
             st.info(f"**Classification:** {res['Category']}  |  **Expected Goals:** {home_team} `{raw['exp_hg']:.2f}` — `{raw['exp_ag']:.2f}` {away_team}")
 
-            # Action Buttons
             b1, b2 = st.columns(2)
             if b1.button("➕ Add to Today's Tips List", use_container_width=True):
                 res_copy = {k: v for k, v in res.items() if k != "_raw"}
-                res_copy["League"] = league_name
+                res_copy["Competition"] = selected_comp_label
                 st.session_state.daily_list.append(res_copy)
                 st.success("Added to Daily Tips tab!")
 
-            pick_odds_for_save = {"1": o1, "X": ox, "2": o2, "1X": round(1/(1/o1 + 1/ox), 2), "X2": round(1/(1/o2 + 1/ox), 2)}.get(res["Tip"], o1)
+            pick_odds = {"1": o1, "X": ox, "2": o2, "1X": round(1/(1/o1 + 1/ox), 2), "X2": round(1/(1/o2 + 1/ox), 2)}.get(res["Tip"], o1)
             if b2.button("💾 Save Pick to My Bet Tracker", use_container_width=True):
-                save_bet(league_name, res["Match"], res["Tip"], res["Conf"], pick_odds_for_save, stake_amt)
+                save_bet(selected_comp_label, res["Match"], res["Tip"], res["Conf"], pick_odds, stake_amt)
                 st.success("Saved to My Bet Tracker!")
 
-            # Deep Stats Breakdown
-            st.subheader("📊 Match Breakdown (Last 5 Home vs Last 5 Away)")
+            st.subheader("📊 Last 5 Home vs Last 5 Away Breakdown")
             col_h, col_a = st.columns(2)
             with col_h:
                 h5 = raw["h_last5"]
                 st.markdown(f"**🏠 {home_team} (Last 5 Home)** — Form: `{h5['form']}`")
-                st.write(f"Goals Scored/Conceded: **{h5['gf']}** / **{h5['ga']}** | Corners Avg: **{h5['corners']}** | Shots OT: **{h5['shots_ot']}**")
-                st.write(f"Trends: Over 1.5: **{h5['o15']}%** | Over 2.5: **{h5['o25']}%** | Over 3.5: **{h5['o35']}%** | BTTS: **{h5['btts']}%**")
+                st.write(f"Goals Scored/Conceded: **{h5['gf']}** / **{h5['ga']}** | Corners: **{h5['corners']}** | Shots OT: **{h5['shots_ot']}**")
+                st.write(f"Over 1.5: **{h5['o15']}%** | Over 2.5: **{h5['o25']}%** | Over 3.5: **{h5['o35']}%** | BTTS: **{h5['btts']}%**")
             with col_a:
                 a5 = raw["a_last5"]
                 st.markdown(f"**✈️ {away_team} (Last 5 Away)** — Form: `{a5['form']}`")
-                st.write(f"Goals Scored/Conceded: **{a5['gf']}** / **{a5['ga']}** | Corners Avg: **{a5['corners']}** | Shots OT: **{a5['shots_ot']}**")
-                st.write(f"Trends: Over 1.5: **{a5['o15']}%** | Over 2.5: **{a5['o25']}%** | Over 3.5: **{a5['o35']}%** | BTTS: **{a5['btts']}%**")
+                st.write(f"Goals Scored/Conceded: **{a5['gf']}** / **{a5['ga']}** | Corners: **{a5['corners']}** | Shots OT: **{a5['shots_ot']}**")
+                st.write(f"Over 1.5: **{a5['o15']}%** | Over 2.5: **{a5['o25']}%** | Over 3.5: **{a5['o35']}%** | BTTS: **{a5['btts']}%**")
 
-            st.markdown("**Model Probabilities & Bookmaker Value (+EV)**")
             ev_df = pd.DataFrame({
                 "Outcome": ["Home (1)", "Draw (X)", "Away (2)"],
                 "Model Prob": [f"{raw['p_1']*100:.1f}%", f"{raw['p_x']*100:.1f}%", f"{raw['p_2']*100:.1f}%"],
@@ -325,11 +510,10 @@ with tab_analyze:
 with tab_daily:
     st.subheader("🔥 Today's Curated Tips")
     if not st.session_state.daily_list:
-        st.info("Use the **Match Analyzer** tab and click **'Add to Today's Tips List'** to build today's card.")
+        st.info("Analyze matches and click **'Add to Today's Tips List'** to build today's card.")
     else:
         df_daily = pd.DataFrame(st.session_state.daily_list)
         st.dataframe(df_daily, hide_index=True, use_container_width=True)
-
         c1, c2, c3 = st.columns(3)
         with c1:
             st.markdown("### 🔒 Bankers")
@@ -340,7 +524,6 @@ with tab_daily:
         with c3:
             st.markdown("### ⚖️ Draws of the Day")
             st.dataframe(df_daily[df_daily["Category"].str.contains("Draw")][["Match", "X", "Score"]], hide_index=True)
-
         if st.button("🗑️ Clear Today's List"):
             st.session_state.daily_list = []
             st.rerun()
@@ -349,7 +532,7 @@ with tab_tracker:
     st.subheader("📒 My Bet History & ROI")
     bets_df = load_bets()
     if bets_df.empty:
-        st.info("No saved picks yet. Save picks from the Match Analyzer to track your real performance.")
+        st.info("No saved picks yet.")
     else:
         settled = bets_df[bets_df["status"].isin(["Won", "Lost"])]
         total_staked = settled["stake"].sum() if not settled.empty else 0.0
@@ -358,7 +541,7 @@ with tab_tracker:
         roi = (total_profit / total_staked * 100) if total_staked > 0 else 0.0
 
         k1, k2, k3, k4 = st.columns(4)
-        k1.metric("Total Saved Picks", len(bets_df))
+        k1.metric("Saved Picks", len(bets_df))
         k2.metric("Win Rate", f"{win_rate:.1f}%")
         k3.metric("Net Profit/Loss", f"{total_profit:+,.2f}")
         k4.metric("ROI", f"{roi:+.1f}%")
