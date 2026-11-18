@@ -27,8 +27,8 @@ MAIN_CSV_LEAGUES = {
     "🇬🇧 England - League 1": "E2",
     "🇬🇧 England - League 2": "E3",
     "🇬🇧 England - National League": "EC",
-    "Scotland - Premiership": "SC0",
-    "Scotland - Championship": "SC1",
+    "🏴 Scotland - Premiership": "SC0",
+    "🏴 Scotland - Championship": "SC1",
     "🇪🇸 Spain - La Liga": "SP1",
     "🇪🇸 Spain - Segunda": "SP2",
     "🇩🇪 Germany - Bundesliga": "D1",
@@ -63,6 +63,7 @@ WORLD_CSV_LEAGUES = {
     "🇨🇭 Switzerland - Super League": "SWZ",
 }
 
+
 # --- 2. DATABASE FOR PERSONAL BET TRACKING ---
 def init_db():
     conn = sqlite3.connect("my_bets.db")
@@ -83,6 +84,7 @@ def init_db():
     conn.commit()
     conn.close()
 
+
 def save_bet(league, match_name, tip, confidence, odds, stake):
     conn = sqlite3.connect("my_bets.db")
     conn.execute(
@@ -91,6 +93,7 @@ def save_bet(league, match_name, tip, confidence, odds, stake):
     )
     conn.commit()
     conn.close()
+
 
 def update_bet_status(bet_id, status):
     conn = sqlite3.connect("my_bets.db")
@@ -102,13 +105,16 @@ def update_bet_status(bet_id, status):
         conn.commit()
     conn.close()
 
+
 def load_bets():
     conn = sqlite3.connect("my_bets.db")
     df = pd.read_sql_query("SELECT * FROM bets ORDER BY id DESC", conn)
     conn.close()
     return df
 
+
 init_db()
+
 
 # --- 3. DATA LOADERS ---
 @st.cache_data(ttl=1800)
@@ -116,7 +122,8 @@ def load_espn_competition(slug):
     base = f"https://site.api.espn.com/apis/site/v2/sports/soccer/{slug}/scoreboard"
     date_windows = [None, "20260801-20270131", "20260101-20260731", "20250801-20251231"]
     seen_ids = set()
-    finished, upcoming = [], []
+    finished = []
+    upcoming = []
     headers = {"User-Agent": "Mozilla/5.0"}
 
     for win in date_windows:
@@ -147,8 +154,8 @@ def load_espn_competition(slug):
                 state = ((comp.get("status") or {}).get("type") or {}).get("state", "")
                 if state == "post":
                     try:
-                        hg = int(float(home_c.get("score", 0)))
-                        ag = int(float(away_c.get("score", 0)))
+                        hg = int(float(home_c.get("score") or 0))
+                        ag = int(float(away_c.get("score") or 0))
                         finished.append({"Date": dt, "HomeTeam": h_name, "AwayTeam": a_name, "FTHG": hg, "FTAG": ag})
                     except (ValueError, TypeError):
                         pass
@@ -163,6 +170,7 @@ def load_espn_competition(slug):
         df = df.sort_values("DateParsed").reset_index(drop=True)
     upcoming = sorted(set(upcoming), key=lambda x: x[0])[:20]
     return df, upcoming
+
 
 @st.cache_data(ttl=3600)
 def load_main_csv_league(code):
@@ -184,6 +192,7 @@ def load_main_csv_league(code):
     full = full.sort_values("DateParsed").reset_index(drop=True)
     return full, []
 
+
 @st.cache_data(ttl=3600)
 def load_world_csv_league(code):
     url = f"https://www.football-data.co.uk/new/{code}.csv"
@@ -199,6 +208,7 @@ def load_world_csv_league(code):
     except Exception:
         return pd.DataFrame(), []
 
+
 @st.cache_data(ttl=3600)
 def search_goal_api_leagues(query, api_key):
     try:
@@ -212,6 +222,7 @@ def search_goal_api_leagues(query, api_key):
     except Exception:
         return []
 
+
 @st.cache_data(ttl=1800)
 def load_goal_api_fixtures(league_id, api_key):
     try:
@@ -224,13 +235,16 @@ def load_goal_api_fixtures(league_id, api_key):
         if r.status_code != 200:
             return pd.DataFrame(), []
         items = r.json().get("data", [])
-        finished, upcoming = [], []
+        finished = []
+        upcoming = []
         for m in items:
-            h, a = m.get("homeTeamName"), m.get("awayTeamName")
+            h = m.get("homeTeamName")
+            a = m.get("awayTeamName")
             if not h or not a:
                 continue
             dt = (m.get("kickoffUtc") or "")[:10]
-            hs, as_ = m.get("homeTeamScore"), m.get("awayTeamScore")
+            hs = m.get("homeTeamScore")
+            as_ = m.get("awayTeamScore")
             status = str(m.get("matchStatus") or "").upper()
             if hs is not None and as_ is not None and status in ("FINISHED", "FT", "AET", "PEN"):
                 try:
@@ -247,6 +261,7 @@ def load_goal_api_fixtures(league_id, api_key):
     except Exception:
         return pd.DataFrame(), []
 
+
 # --- 4. STATS, POWER RANK & H2H ---
 def get_team_metrics(df, team, venue="all", last_n=5):
     if venue == "home":
@@ -257,7 +272,11 @@ def get_team_metrics(df, team, venue="all", last_n=5):
         games = df[(df["HomeTeam"] == team) | (df["AwayTeam"] == team)].tail(last_n)
 
     if games.empty:
-        return {"form": "-", "gf": 1.2, "ga": 1.2, "o15": 60, "o25": 45, "o35": 20, "btts": 50, "corners": 0.0, "shots_ot": 0.0, "power": 50.0}
+        return {
+            "form": "-", "gf": 1.2, "ga": 1.2,
+            "o15": 60, "o25": 45, "o35": 20, "btts": 50,
+            "corners": 0.0, "shots_ot": 0.0, "power": 50.0,
+        }
 
     form_list = []
     gf_tot = ga_tot = o15 = o25 = o35 = btts = corners_tot = sot_tot = pts = 0
@@ -272,16 +291,22 @@ def get_team_metrics(df, team, venue="all", last_n=5):
         ga_tot += ga
         tot = gf + ga
         if gf > ga:
-            form_list.append("W"); pts += 3
+            form_list.append("W")
+            pts += 3
         elif gf == ga:
-            form_list.append("D"); pts += 1
+            form_list.append("D")
+            pts += 1
         else:
             form_list.append("L")
 
-        if tot > 1: o15 += 1
-        if tot > 2: o25 += 1
-        if tot > 3: o35 += 1
-        if gf > 0 and ga > 0: btts += 1
+        if tot > 1:
+            o15 += 1
+        if tot > 2:
+            o25 += 1
+        if tot > 3:
+            o35 += 1
+        if gf > 0 and ga > 0:
+            btts += 1
         if has_corners and pd.notna(r["HC"]) and pd.notna(r["AC"]):
             corners_tot += r["HC"] if is_h else r["AC"]
         if has_sot and pd.notna(r["HST"]) and pd.notna(r["AST"]):
@@ -305,11 +330,13 @@ def get_team_metrics(df, team, venue="all", last_n=5):
         "power": round(power, 1),
     }
 
+
 def get_h2h(df, home, away, last_n=5):
     h2h = df[((df["HomeTeam"] == home) & (df["AwayTeam"] == away)) | ((df["HomeTeam"] == away) & (df["AwayTeam"] == home))].tail(last_n)
     if h2h.empty:
         return pd.DataFrame()
     return h2h[["Date", "HomeTeam", "FTHG", "FTAG", "AwayTeam"]].iloc[::-1]
+
 
 # --- 5. POISSON PREDICTION ENGINE ---
 def analyze_fixture(df, home, away, odds_1, odds_x, odds_2):
@@ -323,8 +350,8 @@ def analyze_fixture(df, home, away, odds_1, odds_x, odds_2):
     if a_last5["form"] == "-" and a_all["form"] != "-":
         a_last5 = a_all
 
-    avg_hg = max(df["FTHG"].mean(), 0.5)
-    avg_ag = max(df["FTAG"].mean(), 0.5)
+    avg_hg = max(float(df["FTHG"].mean()), 0.5)
+    avg_ag = max(float(df["FTAG"].mean()), 0.5)
 
     h_att = (h_last5["gf"] * 0.65 + h_all["gf"] * 0.35) / avg_hg
     a_def = (a_last5["ga"] * 0.65 + a_all["ga"] * 0.35) / avg_hg
@@ -365,7 +392,9 @@ def analyze_fixture(df, home, away, odds_1, odds_x, odds_2):
 
     confidence = int(np.clip(round((conf_prob - 0.25) / 0.60 * 9 + 1), 1, 10))
 
-    ev_1, ev_x, ev_2 = (p_1 * odds_1) - 1, (p_x * odds_x) - 1, (p_2 * odds_2) - 1
+    ev_1 = (p_1 * odds_1) - 1
+    ev_x = (p_x * odds_x) - 1
+    ev_2 = (p_2 * odds_2) - 1
     ev_map = {"1": ev_1, "X": ev_x, "2": ev_2}
     best_ev_side = max(ev_map, key=ev_map.get)
     best_ev = ev_map[best_ev_side]
@@ -379,12 +408,16 @@ def analyze_fixture(df, home, away, odds_1, odds_x, odds_2):
     if p_x >= 0.29 and abs(h_last5["power"] - a_last5["power"]) <= 12:
         tags.append("⚖️ Draw Watch")
 
+    ou_label = "Over" if p_o25 >= 0.52 else "Under"
+
     return {
         "Match": f"{home} vs {away}",
         "Tip": display_pick,
         "Conf": confidence,
-        "1": odds_1, "X": odds_x, "2": odds_2,
-        "O/U 2.5": f"{'Over' if p_o25 >= 0.52 else 'Under'} ({p_o25*100:.0f}%)",
+        "1": odds_1,
+        "X": odds_x,
+        "2": odds_2,
+        "O/U 2.5": f"{ou_label} ({p_o25*100:.0f}%)",
         "BTTS": f"{p_btts*100:.0f}%",
         "Score": score_tip,
         "Category": " | ".join(tags) if tags else "Standard",
@@ -393,13 +426,15 @@ def analyze_fixture(df, home, away, odds_1, odds_x, odds_2):
             "p_1": p_1, "p_x": p_x, "p_2": p_2,
             "p_o15": p_o15, "p_o25": p_o25, "p_o35": p_o35, "p_btts": p_btts,
             "ev": ev_map, "h_last5": h_last5, "a_last5": a_last5,
-        }
+        },
     }
 
-# --- 6. AI ADVISOR ENGINE (OFFLINE SMART ENGINE + GROQ / GEMINI) ---
+
+# --- 6. AI ADVISOR ENGINE (BUILT-IN + GROQ + GEMINI WITH AUTO-FALLBACK) ---
 def build_match_context(res, h2h_df, comp_label):
     raw = res["_raw"]
-    h5, a5 = raw["h_last5"], raw["a_last5"]
+    h5 = raw["h_last5"]
+    a5 = raw["a_last5"]
     h2h_txt = "No recent H2H found." if h2h_df.empty else h2h_df.to_string(index=False)
 
     return f"""Competition: {comp_label}
@@ -424,6 +459,7 @@ Away Last 5 (Away Only): Form={a5['form']}, GF={a5['gf']}, GA={a5['ga']}, PowerR
 
 Recent H2H:
 {h2h_txt}"""
+
 
 def builtin_smart_advisor(res, question):
     raw = res["_raw"]
@@ -450,12 +486,16 @@ def builtin_smart_advisor(res, question):
     q = question.lower()
 
     if "value" in q or "odds" in q or "high" in q:
-        focus = f"💎 **Best Value Pick:** `{best_ev_side}` ({best_ev_val*100:+.1f}% EV against your odds)." if best_ev_val > 0 else "⚠️ None of the 1X2 odds show positive value (+EV) right now—bookie margins are tight."
+        if best_ev_val > 0:
+            focus = f"💎 **Best Value Pick:** `{best_ev_side}` (`{best_ev_val*100:+.1f}%` EV against your odds)."
+        else:
+            focus = "⚠️ None of the 1X2 odds show positive value (+EV) right now—bookmaker margins are tight."
     elif "goal" in q or "over" in q or "under" in q or "btts" in q or "gg" in q:
-        goal_markets = [(k, v) for k, v in ranked if any(w in k for w in ["Goals", "BTTS"])]
-        focus = f"⚽ **Best Goals Option:** **{goal_markets[0][0]}** ({goal_markets[0][1]*100:.1f}% probability) | Expected total goals: `{raw['exp_hg'] + raw['exp_ag']:.2f}`."
+        goal_markets = [(k, v) for k, v in ranked if ("Goals" in k or "BTTS" in k)]
+        exp_tot = raw["exp_hg"] + raw["exp_ag"]
+        focus = f"⚽ **Best Goals Option:** **{goal_markets[0][0]}** (`{goal_markets[0][1]*100:.1f}%` probability) | Expected total goals: `{exp_tot:.2f}`."
     else:
-        focus = f"🎯 **Top Overall Recommendation:** **{safest_1}** ({p1*100:.1f}% probability)."
+        focus = f"🎯 **Top Overall Recommendation:** **{safest_1}** (`{p1*100:.1f}%` probability)."
 
     return (
         f"**Built-in Smart Analysis for {res['Match']}**\n\n"
@@ -464,11 +504,13 @@ def builtin_smart_advisor(res, question):
         f"1. **{safest_1}** — `{p1*100:.1f}%`\n"
         f"2. **{safest_2}** — `{p2*100:.1f}%`\n"
         f"3. **{safest_3}** — `{p3*100:.1f}%`\n\n"
-        f"**Value Check:** Best 1X2 edge is `{best_ev_side}` (`{best_ev_val*100:+.1f}% EV`) | **Projected Score:** `{res['Score']}`\n\n"
-        f"*(Tip: Paste a free Groq or Gemini API key in the sidebar to chat naturally with a live LLM!)*"
+        f"**Value Check:** Best 1X2 edge is `{best_ev_side}` (`{best_ev_val*100:+.1f}%` EV) | **Projected Score:** `{res['Score']}`\n\n"
+        "*(Paste a free Groq or Gemini key in the sidebar to chat with a live AI model.)*"
     )
 
-def ask_live_aijson={"model": "openai/gpt-oss-120b", "messages": msgs, "temperature": 0.3},
+
+def ask_live_ai(provider, api_key, match_context, chat_history, user_question):
+    system_prompt = (
         "You are an expert, disciplined football betting analyst inside the user's personal prediction app. "
         "Base your answer strictly on the match stats, Poisson probabilities, Power Ranks, H2H, and bookmaker odds provided below. "
         "Never invent stats or injuries not in the data. Always recommend the single best option (and an accumulator-safe backup if helpful), "
@@ -476,46 +518,66 @@ def ask_live_aijson={"model": "openai/gpt-oss-120b", "messages": msgs, "temperat
         f"--- CURRENT MATCH DATA ---\n{match_context}"
     )
 
-    if provider == "Groq (Free Llama 3.3 70B)":
+    clean_key = api_key.strip()
+
+    if provider == "Groq (Free AI)":
         msgs = [{"role": "system", "content": system_prompt}]
         for m in chat_history[-6:]:
             msgs.append({"role": m["role"], "content": m["content"]})
         msgs.append({"role": "user", "content": user_question})
-        try:
-            r = requests.post(
-                "https://api.groq.com/openai/v1/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json={"model": "llama-3.3-70b-versatile", "messages": msgs, "temperature": 0.3},
-                timeout=25,
-            )
-            if r.status_code == 200:
-                return r.json()["choices"][0]["message"]["content"]
-            return f"Groq API Error ({r.status_code}): {r.text}"
-        except Exception as e:
-            return f"Connection error: {e}"
 
-    elif provider == "Google Gemini (Free Gemini 2.5 Flash)":
+        groq_models = ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"]
+        last_err = ""
+        for model_name in groq_models:
+            try:
+                r = requests.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {clean_key}", "Content-Type": "application/json"},
+                    json={"model": model_name, "messages": msgs, "temperature": 0.3},
+                    timeout=25,
+                )
+                if r.status_code == 200:
+                    return r.json()["choices"][0]["message"]["content"]
+                last_err = f"Groq ({model_name}) Error {r.status_code}: {r.text}"
+                if r.status_code == 401:
+                    return "❌ Invalid Groq API key. Check that you copied the full `gsk_...` key from console.groq.com."
+            except Exception as e:
+                last_err = f"Connection error: {e}"
+        return last_err
+
+    elif provider == "Google Gemini (Free AI)":
         contents = []
         for m in chat_history[-6:]:
             role = "user" if m["role"] == "user" else "model"
             contents.append({"role": role, "parts": [{"text": m["content"]}]})
         contents.append({"role": "user", "parts": [{"text": user_question}]})
-        try:
-            r = requests.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={api_key}",
-                    "system_instruction": {"parts": [{"text": system_prompt}]},
-                    "contents": contents,
-                    "generationConfig": {"temperature": 0.3},
-                },
-                timeout=25,
-            )
-            if r.status_code == 200:
-                return r.json()["candidates"][0]["content"]["parts"][0]["text"]
-            return f"Gemini API Error ({r.status_code}): {r.text}"
-        except Exception as e:
-            return f"Connection error: {e}"
 
-    return "Unknown AI provider."
+        gemini_models = ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-3.6-flash"]
+        last_err = ""
+        for model_name in gemini_models:
+            try:
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={clean_key}"
+                r = requests.post(
+                    url,
+                    headers={"Content-Type": "application/json"},
+                    json={
+                        "system_instruction": {"parts": [{"text": system_prompt}]},
+                        "contents": contents,
+                        "generationConfig": {"temperature": 0.3},
+                    },
+                    timeout=25,
+                )
+                if r.status_code == 200:
+                    return r.json()["candidates"][0]["content"]["parts"][0]["text"]
+                last_err = f"Gemini ({model_name}) Error {r.status_code}: {r.text}"
+                if r.status_code in (400, 403) and "API_KEY_INVALID" in r.text:
+                    return "❌ Invalid Gemini API key. Check that you copied the full `AIza...` key from aistudio.google.com."
+            except Exception as e:
+                last_err = f"Connection error: {e}"
+        return last_err
+
+    return "Unknown AI provider selected."
+
 
 # --- 7. SESSION STATE & SIDEBAR ---
 if "daily_list" not in st.session_state:
@@ -528,7 +590,7 @@ mode = st.sidebar.radio(
     "Category",
     [
         "🏆 UEFA, CAF, AFC & FIFA Cups (Free, No Key)",
-        "⚽ 38 Global Domestic Leagues (Free, No Key)",
+        "⚽ 36 Global Domestic Leagues (Free, No Key)",
         "🔎 All 1,000+ Competitions (Free GOAL API Key)",
     ],
 )
@@ -545,7 +607,7 @@ if mode == "🏆 UEFA, CAF, AFC & FIFA Cups (Free, No Key)":
         selected_comp_label = f"Custom ({slug})"
     df_league, upcoming_fixtures = load_espn_competition(slug)
 
-elif mode == "⚽ 38 Global Domestic Leagues (Free, No Key)":
+elif mode == "⚽ 36 Global Domestic Leagues (Free, No Key)":
     all_builtin = {**MAIN_CSV_LEAGUES, **WORLD_CSV_LEAGUES}
     selected_comp_label = st.sidebar.selectbox("Select League", list(all_builtin.keys()))
     code = all_builtin[selected_comp_label]
@@ -577,13 +639,14 @@ st.sidebar.divider()
 st.sidebar.header("🤖 AI Space Settings")
 ai_provider = st.sidebar.selectbox(
     "AI Engine",
-    ["Built-in Smart Advisor (No Key)", "Groq (Free Llama 3.3 70B)", "Google Gemini (Free Gemini 2.5 Flash)"],
+    ["Built-in Smart Advisor (No Key)", "Groq (Free AI)", "Google Gemini (Free AI)"],
 )
 ai_api_key = ""
 if ai_provider != "Built-in Smart Advisor (No Key)":
     ai_api_key = st.sidebar.text_input("Paste Free AI Key", type="password")
     if not ai_api_key:
         st.sidebar.caption("Get a free key (no card) at console.groq.com or aistudio.google.com")
+
 
 # --- 8. MAIN DASHBOARD ---
 st.title("🌍 My World Football Predictor + AI")
@@ -599,7 +662,8 @@ with tab_analyze:
         st.caption(f"Loaded **{len(df_league)}** matches for **{selected_comp_label}**")
         teams = sorted(set(df_league["HomeTeam"].unique()) | set(df_league["AwayTeam"].unique()))
 
-        default_h_idx, default_a_idx = 0, min(1, len(teams) - 1)
+        default_h_idx = 0
+        default_a_idx = min(1, len(teams) - 1)
         if upcoming_fixtures:
             fix_labels = ["-- Manual Pick --"] + [f"{dt} | {h} vs {a}" for dt, h, a in upcoming_fixtures]
             picked_fix = st.selectbox("📅 Upcoming Fixtures Found (Click to Auto-Select)", fix_labels)
@@ -648,7 +712,9 @@ with tab_analyze:
                 st.session_state.daily_list.append(res_copy)
                 st.success("Added to Daily Tips tab!")
 
-            pick_odds = {"1": o1, "X": ox, "2": o2, "1X": round(1/(1/o1 + 1/ox), 2), "X2": round(1/(1/o2 + 1/ox), 2)}.get(res["Tip"], o1)
+            dc_1x = round(1 / (1 / o1 + 1 / ox), 2)
+            dc_x2 = round(1 / (1 / o2 + 1 / ox), 2)
+            pick_odds = {"1": o1, "X": ox, "2": o2, "1X": dc_1x, "X2": dc_x2}.get(res["Tip"], o1)
             if b2.button("💾 Save Pick to My Bet Tracker", use_container_width=True):
                 save_bet(selected_comp_label, res["Match"], res["Tip"], res["Conf"], pick_odds, stake_amt)
                 st.success("Saved to My Bet Tracker!")
@@ -669,9 +735,17 @@ with tab_analyze:
             ev_df = pd.DataFrame({
                 "Outcome": ["Home (1)", "Draw (X)", "Away (2)"],
                 "Model Prob": [f"{raw['p_1']*100:.1f}%", f"{raw['p_x']*100:.1f}%", f"{raw['p_2']*100:.1f}%"],
-                "Fair Odds": [round(1/max(raw["p_1"], 0.01), 2), round(1/max(raw["p_x"], 0.01), 2), round(1/max(raw["p_2"], 0.01), 2)],
+                "Fair Odds": [
+                    round(1 / max(raw["p_1"], 0.01), 2),
+                    round(1 / max(raw["p_x"], 0.01), 2),
+                    round(1 / max(raw["p_2"], 0.01), 2),
+                ],
                 "Your Odds": [o1, ox, o2],
-                "Value (EV)": [f"{raw['ev']['1']*100:+.1f}%", f"{raw['ev']['X']*100:+.1f}%", f"{raw['ev']['2']*100:+.1f}%"],
+                "Value (EV)": [
+                    f"{raw['ev']['1']*100:+.1f}%",
+                    f"{raw['ev']['X']*100:+.1f}%",
+                    f"{raw['ev']['2']*100:+.1f}%",
+                ],
             })
             st.dataframe(ev_df, hide_index=True, use_container_width=True)
 
@@ -687,7 +761,6 @@ with tab_ai:
         st.success(f"**Active Match:** {current_res['Match']} ({selected_comp_label}) | **Odds:** 1=`{current_res['1']}` X=`{current_res['X']}` 2=`{current_res['2']}`")
         match_ctx = build_match_context(current_res, current_h2h, selected_comp_label)
 
-        # 1-Click Quick Prompts (Great on Phone!)
         st.markdown("**Quick Questions:**")
         q_cols = st.columns(4)
         quick_q = None
@@ -709,7 +782,7 @@ with tab_ai:
         if user_prompt:
             st.session_state.ai_messages.append({"role": "user", "content": user_prompt})
             with st.spinner("Analyzing match data..."):
-                if ai_provider == "Built-in Smart Advisor (No Key)" or not ai_api_key:
+                if ai_provider == "Built-in Smart Advisor (No Key)" or not ai_api_key.strip():
                     reply = builtin_smart_advisor(current_res, user_prompt)
                 else:
                     reply = ask_live_ai(ai_provider, ai_api_key, match_ctx, st.session_state.ai_messages[:-1], user_prompt)
