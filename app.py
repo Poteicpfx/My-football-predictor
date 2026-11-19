@@ -173,8 +173,8 @@ def load_the_odds_api(api_key):
 def load_espn_by_date(date_str):
     for host in ["site.api.espn.com", "site.web.api.espn.com"]:
         try:
-            url = f"https://{host}/apis/site/v2/sports/soccer/all/scoreboard?dates={date_str}&limit=300"
-            r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+            url = f"https://{host}/apis/site/v2/sports/soccer/all/scoreboard?dates={date_str}"
+r = requests.get(url, timeout=15)
             if r.status_code != 200: continue
             games = []
             for ev in r.json().get("events", []):
@@ -232,7 +232,7 @@ def load_espn(slug):
     seen, fin, up = set(), [], []
     for w in [None, "20260801-20270131", "20260101-20260731", "20250801-20251231"]:
         try:
-            r = requests.get(base if w is None else f"{base}?dates={w}&limit=400", headers={"User-Agent": "Mozilla/5.0"}, timeout=12)
+            r = requests.get(base if w is None else f"{base}?dates={w}&limit=400", timeout=12)
             if r.status_code != 200: continue
             for ev in r.json().get("events", []):
                 eid = ev.get("id")
