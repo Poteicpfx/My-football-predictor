@@ -1,231 +1,130 @@
-import json, sqlite3
-from datetime import datetime, timedelta, timezone
-import requests
-import streamlit as st
-import pandas as pd
 import numpy as np
+import pandas as pd
 from scipy.stats import poisson
+from data_sources import *
 
-ESPN_CUPS = {
-    "🏆 UEFA Champions League": "uefa.champions", "🟠 UEFA Europa League": "uefa.europa",
-    "🟢 UEFA Conference League": "uefa.europa.conf", "🇪🇺 UEFA Nations League": "uefa.nations",
-    "🇪🇸 Spain - Copa del Rey": "esp.copa_del_rey", "🇩🇪 Germany - DFB Pokal": "ger.dfb_pokal",
-    "🌍 FIFA World Cup": "fifa.world", "🌍 CAF AFCON": "caf.nations",
-    "🌏 AFC Champions League": "afc.champions", "🌎 Copa Libertadores": "conmebol.libertadores",
-    "🌎 Copa Sudamericana": "conmebol.sudamericana",
-}
-SCAN_LEAGUES = {
-    "🇬🇧 Premier League": "eng.1", "🇬🇧 Championship": "eng.2", "🇪🇸 La Liga": "esp.1",
-    "🇩🇪 Bundesliga": "ger.1", "🇮🇹 Serie A": "ita.1", "🇫🇷 Ligue 1": "fra.1",
-    "🇳🇱 Eredivisie": "ned.1", "🇵🇹 Liga Portugal": "por.1", "🏆 UEFA Champions League": "uefa.champions",
-    "🟠 UEFA Europa League": "uefa.europa", "🟢 UEFA Conference League": "uefa.europa.conf",
-    "🇪🇺 UEFA Nations League": "uefa.nations", "🇪🇸 Copa del Rey": "esp.copa_del_rey",
-}
-MAIN_LEAGUES = {
-    "🇬🇧 England - Premier League": "E0", "🇬🇧 England - Championship": "E1", "🇬🇧 England - League 1": "E2",
-    "🇬🇧 England - League 2": "E3", "🏴 Scotland - Premiership": "SC0", "🇪🇸 Spain - La Liga": "SP1",
-    "🇪🇸 Spain - Segunda": "SP2", "🇩🇪 Germany - Bundesliga": "D1", "🇩🇪 Germany - 2. Bundesliga": "D2",
-    "🇮🇹 Italy - Serie A": "I1", "🇮🇹 Italy - Serie B": "I2", "🇫🇷 France - Ligue 1": "F1",
-    "🇫🇷 France - Ligue 2": "F2", "🇳🇱 Netherlands - Eredivisie": "N1", "🇧🇪 Belgium - Pro League": "B1",
-    "🇵🇹 Portugal - Liga Portugal": "P1", "🇹🇷 Turkey - Super Lig": "T1", "🇬🇷 Greece - Super League": "G1",
-}
-WORLD_LEAGUES = {
-    "🇦🇷 Argentina - Primera": "ARG", "🇧🇷 Brazil - Serie A": "BRA", "🇺🇸 USA - MLS": "USA",
-    "🇲🇽 Mexico - Liga MX": "MEX", "🇯🇵 Japan - J-League": "JPN", "🇨🇳 China - Super League": "CHN",
-    "🇦🇹 Austria - Bundesliga": "AUT", "🇩🇰 Denmark - Superliga": "DNK", "🇳🇴 Norway - Eliteserien": "NOR",
-    "🇵🇱 Poland - Ekstraklasa": "POL", "🇸🇪 Sweden - Allsvenskan": "SWE", "🇨🇭 Switzerland - Super League": "SWZ",
-}
+def get_metrics(df, team, venue="all", last_n=5):
+    base = {"form":"-","gf":1.2,"ga":1.2,"o15":60,"o25":45,"o35":20,"btts":50,"corners":0.0,"shots_ot":0.0,"power":50.0}
+    if df.empty: return base
+    g = df[df["HomeTeam"]==team].tail(last_n) if venue=="home" else (df[df["AwayTeam"]==team].tail(last_n) if venue=="away" else df[(df["HomeTeam"]==team)|(df["AwayTeam"]==team)].tail(last_n))
+    if g.empty: return base
+    fm, gft, gat, o15, o25, o35, bt, ct, stt, pts = [], 0, 0, 0, 0, 0, 0, 0, 0, 0
+    hc, hs = "HC" in g.columns and "AC" in g.columns, "HST" in g.columns and "AST" in g.columns
+    for _, r in g.iterrows():
+        ih = r["HomeTeam"] == team
+        gf, ga = (r["FTHG"], r["FTAG"]) if ih else (r["FTAG"], r["FTHG"])
+        gft += gf; gat += ga; tot = gf + ga
+        if gf > ga: fm.append("W"); pts += 3
+        elif gf == ga: fm.append("D"); pts += 1
+        else: fm.append("L")
+        if tot > 1: o15 += 1
+        if tot > 2: o25 += 1
+        if tot > 3: o35 += 1
+        if gf > 0 and ga > 0: bt += 1
+        if hc and pd.notna(r["HC"]) and pd.notna(r["AC"]): ct += r["HC"] if ih else r["AC"]
+        if hs and pd.notna(r["HST"]) and pd.notna(r["AST"]): stt += r["HST"] if ih else r["AST"]
+    n = len(g); pwr = float(np.clip((pts/(n*3))*65 + ((gft-gat)/n)*10 + 18, 10, 99))
+    return {"form":"".join(fm),"gf":round(gft/n,2),"ga":round(gat/n,2),"o15":round(o15/n*100),"o25":round(o25/n*100),"o35":round(o35/n*100),"btts":round(bt/n*100),"corners":round(ct/n,1) if hc else 0.0,"shots_ot":round(stt/n,1) if hs else 0.0,"power":round(pwr,1)}
 
-def get_secret(name, default=""):
-    try: return str(st.secrets.get(name, default))
-    except Exception: return default
+def get_h2h(df, h, a):
+    if df.empty: return pd.DataFrame()
+    q = df[((df["HomeTeam"]==h)&(df["AwayTeam"]==a))|((df["HomeTeam"]==a)&(df["AwayTeam"]==h))].tail(5)
+    return pd.DataFrame() if q.empty else q[["Date","HomeTeam","FTHG","FTAG","AwayTeam"]].iloc[::-1]
 
-def init_db():
-    c = sqlite3.connect("my_bets.db")
-    c.execute("CREATE TABLE IF NOT EXISTS bets (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, league TEXT, match_name TEXT, tip TEXT, confidence INTEGER, odds REAL, stake REAL, status TEXT DEFAULT 'Pending', profit REAL DEFAULT 0.0)")
-    c.execute("CREATE TABLE IF NOT EXISTS app_state (key TEXT PRIMARY KEY, value TEXT)")
-    c.commit(); c.close()
+def analyze_fixture(df, home, away, o1=1.85, ox=3.50, o2=4.20):
+    ha, aa = get_metrics(df, home, "all", 15), get_metrics(df, away, "all", 15)
+    h5, a5 = get_metrics(df, home, "home", 5), get_metrics(df, away, "away", 5)
+    if h5["form"] == "-" and ha["form"] != "-": h5 = ha
+    if a5["form"] == "-" and aa["form"] != "-": a5 = aa
+    if h5["form"] == "-" and a5["form"] == "-" and o1 > 1.01 and ox > 1.01 and o2 > 1.01:
+        si = (1/o1) + (1/ox) + (1/o2)
+        eh, ea = float(np.clip(0.8 + ((1/o1)/si)*1.9, 0.4, 3.0)), float(np.clip(0.7 + ((1/o2)/si)*1.8, 0.4, 3.0))
+    else:
+        ahg = max(float(df["FTHG"].mean()), 0.5) if not df.empty else 1.35
+        aag = max(float(df["FTAG"].mean()), 0.5) if not df.empty else 1.15
+        eh = float(np.clip(((h5["gf"]*0.65+ha["gf"]*0.35)/ahg)*((a5["ga"]*0.65+aa["ga"]*0.35)/ahg)*ahg, 0.25, 4.0))
+        ea = float(np.clip(((a5["gf"]*0.65+aa["gf"]*0.35)/aag)*((h5["ga"]*0.65+ha["ga"]*0.35)/aag)*aag, 0.25, 4.0))
+    mat = np.array([[poisson.pmf(i, eh)*poisson.pmf(j, ea) for j in range(7)] for i in range(7)])
+    p1, px, p2 = float(np.sum(np.tril(mat,-1))), float(np.sum(np.diag(mat))), float(np.sum(np.triu(mat,1)))
+    p1x, px2, p12 = p1+px, p2+px, p1+p2
+    po15 = float(sum(mat[i,j] for i in range(7) for j in range(7) if i+j>1))
+    po25 = float(sum(mat[i,j] for i in range(7) for j in range(7) if i+j>2))
+    pu25, pu35 = 1.0-po25, 1.0-float(sum(mat[i,j] for i in range(7) for j in range(7) if i+j>3))
+    pbtts = float(sum(mat[i,j] for i in range(1,7) for j in range(1,7))); png = 1.0-pbtts
+    ts = [f"{np.unravel_index(k,mat.shape)[0]}:{np.unravel_index(k,mat.shape)[1]} ({mat.ravel()[k]*100:.0f}%)" for k in np.argsort(mat.ravel())[::-1][:3]]
+    probs = {"1":p1,"X":px,"2":p2}; bp = max(probs, key=probs.get); bpr = probs[bp]
+    if bp == "1" and bpr < 0.52 and p1x >= 0.72: tip, cp = "1X", p1x
+    elif bp == "2" and bpr < 0.52 and px2 >= 0.72: tip, cp = "X2", px2
+    else: tip, cp = bp, bpr
+    conf = int(np.clip(round((cp-0.25)/0.60*9+1), 1, 10))
+    safes = {"1X":p1x,"X2":px2,"12":p12,"Over 1.5":po15,"Under 3.5":pu35}
+    sn = max(safes, key=safes.get); sp_v = safes[sn]
+    if p1 >= 0.55 and po15 >= 0.68: combo = "1 & Over 1.5"
+    elif p2 >= 0.55 and po15 >= 0.68: combo = "2 & Over 1.5"
+    elif p1x >= 0.72 and pu35 >= 0.65: combo = "1X & Under 3.5"
+    elif px2 >= 0.72 and pu35 >= 0.65: combo = "X2 & Under 3.5"
+    elif po25 >= 0.55 and pbtts >= 0.55: combo = "Over 2.5 & BTTS"
+    else: combo = f"{tip} & {'Over 1.5' if po15>=0.65 else 'Under 3.5'}"
+    evs = {"1":p1*o1-1,"X":px*ox-1,"2":p2*o2-1}; bevs = max(evs, key=evs.get); bev = evs[bevs]
+    tags = []
+    if conf >= 8 and {"1":o1,"X":ox,"2":o2}.get(bp,1.45) <= 1.65: tags.append("🔒 Banker")
+    if bev >= 0.05: tags.append(f"💎 Value ({bevs}: +{bev*100:.0f}% EV)")
+    if px >= 0.29 and abs(h5["power"]-a5["power"]) <= 12: tags.append("⚖️ Draw Watch")
+    verdict = f"{home} xG {eh:.2f} vs {away} {ea:.2f}. Safest: {sn} ({sp_v*100:.0f}%) | Combo: {combo}."
+    return {"Match":f"{home} vs {away}","Tip":tip,"Conf":conf,"Safest":f"{sn} ({sp_v*100:.0f}%)","Combo":combo,"1":o1,"X":ox,"2":o2,"O/U 2.5":f"{'Over' if po25>=0.52 else 'Under'} ({po25*100:.0f}%)","BTTS":f"{pbtts*100:.0f}%","Score":ts[0].split(" ")[0],"Category":" | ".join(tags) if tags else "Standard","_raw":{"home":home,"away":away,"eh":eh,"ea":ea,"p1":p1,"px":px,"p2":p2,"p1x":p1x,"px2":px2,"p12":p12,"po15":po15,"po25":po25,"pu25":pu25,"pu35":pu35,"pbtts":pbtts,"png":png,"top_scores":ts,"verdict":verdict,"ev":evs,"h5":h5,"a5":a5,"sprob":sp_v,"bev":bev,"bevs":bevs}}
 
-def save_state(k, obj):
-    c = sqlite3.connect("my_bets.db"); c.execute("INSERT OR REPLACE INTO app_state (key, value) VALUES (?, ?)", (k, json.dumps(obj))); c.commit(); c.close()
+def scan_selected_leagues(league_names, odds_dict):
+    results = []
+    for lname in league_names:
+        slug = SCAN_LEAGUES.get(lname)
+        if not slug: continue
+        df, up, _ = load_espn(slug)
+        for dt, fh, fa, eo1, eox, eo2, _ in up:
+            fo = find_odds(fh, fa, odds_dict)
+            o1, ox, o2 = (fo[0], fo[1], fo[2]) if fo else (eo1 or 1.85, eox or 3.50, eo2 or 4.20)
+            a = analyze_fixture(df, fh, fa, o1, ox, o2); r = a["_raw"]
+            results.append({"League": lname, "Date": dt, "Match": a["Match"], "Odds": f"{o1}/{ox}/{o2}", "Tip": a["Tip"], "Conf": a["Conf"], "Safest": a["Safest"], "SafeProb": r["sprob"], "Combo": a["Combo"], "O/U 2.5": a["O/U 2.5"], "BTTS": a["BTTS"], "Score": a["Score"], "MaxEV": r["bev"], "BestEVSide": r["bevs"], "Tag": a["Category"]})
+    return sorted(results, key=lambda x: (x["Conf"], x["SafeProb"]), reverse=True)
 
-def load_state(k, default):
-    c = sqlite3.connect("my_bets.db"); r = c.execute("SELECT value FROM app_state WHERE key=?", (k,)).fetchone(); c.close()
-    if r:
-        try: return json.loads(r[0])
-        except Exception: pass
-    return default
+def build_ctx(res, h2h, comp):
+    r = res["_raw"]; h5, a5 = r["h5"], r["a5"]
+    return f"Comp: {comp} | Match: {res['Match']} | Odds 1={res['1']} X={res['X']} 2={res['2']}\nxG: {r['home']} {r['eh']:.2f} - {r['ea']:.2f} {r['away']} | 1={r['p1']*100:.1f}% X={r['px']*100:.1f}% 2={r['p2']*100:.1f}%\nDC: 1X={r['p1x']*100:.1f}% X2={r['px2']*100:.1f}% | O1.5={r['po15']*100:.1f}% O2.5={r['po25']*100:.1f}% BTTS={r['pbtts']*100:.1f}%\nSafest: {res['Safest']} | Combo: {res['Combo']} | Scores: {', '.join(r['top_scores'])}\nH-L5: {h5['form']} Pwr={h5['power']} | A-L5: {a5['form']} Pwr={a5['power']}\nH2H:\n{'None' if h2h.empty else h2h.to_string(index=False)}"
 
-def save_bet(lg, m, tip, conf, odds, stake):
-    c = sqlite3.connect("my_bets.db")
-    c.execute("INSERT INTO bets (date,league,match_name,tip,confidence,odds,stake) VALUES (?,?,?,?,?,?,?)", (datetime.now().strftime("%Y-%m-%d %H:%M"), lg, m, tip, conf, odds, stake))
-    c.commit(); c.close()
+def smart_advisor(res, q):
+    r = res["_raw"]
+    mkts = sorted([(f"{r['home']} (1)",r["p1"]),("Draw (X)",r["px"]),(f"{r['away']} (2)",r["p2"]),("1X",r["p1x"]),("X2",r["px2"]),("Over 1.5",r["po15"]),("Over 2.5",r["po25"]),("Under 2.5",r["pu25"]),("Under 3.5",r["pu35"]),("BTTS Yes",r["pbtts"]),("BTTS No",r["png"])], key=lambda x:x[1], reverse=True)
+    return f"**Smart Analysis: {res['Match']}**\n\n🎯 **Best Pick:** **{mkts[0][0]}** (`{mkts[0][1]*100:.1f}%`) | **Combo:** `{res['Combo']}`\n\n1. **{mkts[0][0]}** — `{mkts[0][1]*100:.1f}%`\n2. **{mkts[1][0]}** — `{mkts[1][1]*100:.1f}%`\n3. **{mkts[2][0]}** — `{mkts[2][1]*100:.1f}%`\n\n💎 **Best Value:** `{r['bevs']}` (`{r['bev']*100:+.1f}%` EV) | **Scores:** {', '.join(r['top_scores'])}"
 
-def update_bet(bid, status):
-    c = sqlite3.connect("my_bets.db"); row = c.execute("SELECT odds,stake FROM bets WHERE id=?", (bid,)).fetchone()
-    if row:
-        p = round(row[1]*(row[0]-1), 2) if status == "Won" else (-row[1] if status == "Lost" else 0.0)
-        c.execute("UPDATE bets SET status=?, profit=? WHERE id=?", (status, p, bid)); c.commit()
-    c.close()
-
-def load_bets():
-    c = sqlite3.connect("my_bets.db"); df = pd.read_sql_query("SELECT * FROM bets ORDER BY id DESC", c); c.close(); return df
-
-def am_to_dec(ml):
-    try:
-        v = float(ml)
-        if v == 0: return None
-        return round(1 + v/100.0, 2) if v > 0 else round(1 + 100.0/abs(v), 2)
-    except Exception: return None
-
-def parse_espn_odd(b):
-    if not isinstance(b, dict): return None
-    if b.get("value"):
+def ask_llm(prov, key, sys_p, hist, q):
+    k = key.strip()
+    if prov == "Groq (Free AI)":
+        msgs = [{"role":"system","content":sys_p}] + [{"role":m["role"],"content":m["content"]} for m in hist[-6:]] + [{"role":"user","content":q}]
+        err = ""
+        for m in ["openai/gpt-oss-120b","openai/gpt-oss-20b","qwen/qwen3.8-27b"]:
+            try:
+                r = requests.post("https://api.groq.com/openai/v1/chat/completions", headers={"Authorization":f"Bearer {k}","Content-Type":"application/json"}, json={"model":m,"messages":msgs,"temperature":0.3}, timeout=25)
+                if r.status_code == 200: return r.json()["choices"][0]["message"]["content"]
+                err = f"Groq Error {r.status_code}: {r.text[:150]}"
+            except Exception as e: err = str(e)
+        return err
+    contents = [{"role":"user" if m["role"]=="user" else "model","parts":[{"text":m["content"]}]} for m in hist[-6:]] + [{"role":"user","parts":[{"text":q}]}]
+    err = ""
+    for m in ["gemini-3.8-flash","gemini-3.5-flash-lite","gemini-3.6-flash","gemini-flash-latest"]:
         try:
-            v = float(b["value"])
-            if v > 1.01: return round(v, 2)
-        except Exception: pass
-    return am_to_dec(b["moneyLine"]) if b.get("moneyLine") is not None else None
+            r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={k}", headers={"Content-Type":"application/json"}, json={"system_instruction":{"parts":[{"text":sys_p}]},"contents":contents,"generationConfig":{"temperature":0.3}}, timeout=25)
+            if r.status_code == 200: return r.json()["candidates"][0]["content"]["parts"][0]["text"]
+            err = f"Gemini Error {r.status_code}: {r.text[:150]}"
+        except Exception as e: err = str(e)
+    return err
 
-def extract_comp_odds(comp):
-    odl = comp.get("odds") or []
-    if not odl: return None, None, None, ""
-    od = odl[0]
-    o1, ox, o2 = parse_espn_odd(od.get("homeTeamOdds")), parse_espn_odd(od.get("drawOdds")), parse_espn_odd(od.get("awayTeamOdds"))
-    return o1, ox, o2, ((od.get("provider") or {}).get("name", "ESPN Odds") if o1 else "")
-
-def norm_t(s): return "".join(c for c in s.lower() if c.isalnum() or c == " ").strip()
-
-def find_odds(h, a, od):
-    if not od: return None
-    nh, na = norm_t(h), norm_t(a)
-    if (nh, na) in od: return od[(nh, na)]
-    sw = {"fc","cf","sc","ac","afc","club","city","united","real"}
-    hw = {w for w in nh.split() if len(w) > 2 and w not in sw}
-    aw = {w for w in na.split() if len(w) > 2 and w not in sw}
-    for (oh, oa), val in od.items():
-        if (nh in oh or oh in nh or (hw and any(w in oh for w in hw))) and (na in oa or oa in na or (aw and any(w in oa for w in aw))):
-            return val
-    return None
-
-@st.cache_data(ttl=1800)
-def load_the_odds_api(key):
-    if not key.strip(): return [], {}, ""
-    try:
-        r = requests.get("https://api.the-odds-api.com/v4/sports/upcoming/odds", params={"apiKey": key.strip(), "regions": "uk,eu", "markets": "h2h", "oddsFormat": "decimal"}, timeout=15)
-        if r.status_code != 200: return [], {}, f"The Odds API {r.status_code}: {r.text[:100]}"
-        evs, om = [], {}
-        for ev in r.json():
-            if not str(ev.get("sport_key", "")).startswith("soccer"): continue
-            h, a, bks = ev.get("home_team", ""), ev.get("away_team", ""), ev.get("bookmakers") or []
-            if not h or not a or not bks: continue
-            bk = bks[0]; mkt = next((m for m in bk.get("markets", []) if m.get("key") == "h2h"), None)
-            if not mkt: continue
-            o1 = ox = o2 = None
-            for out in mkt.get("outcomes", []):
-                if out.get("name") == h: o1 = out.get("price")
-                elif out.get("name") == a: o2 = out.get("price")
-                elif str(out.get("name", "")).lower() == "draw": ox = out.get("price")
-            if o1 and ox and o2:
-                val = (round(float(o1), 2), round(float(ox), 2), round(float(o2), 2), bk.get("title", "Bookie"))
-                om[(norm_t(h), norm_t(a))] = val
-                evs.append({"DateTime": ev.get("commence_time", "")[:16].replace("T", " "), "League": ev.get("sport_title", "Soccer"), "Home": h, "Away": a, "1": val[0], "X": val[1], "2": val[2], "Bookie": val[3], "LeagueId": None})
-        return evs, om, ""
-    except Exception as e: return [], {}, str(e)
-
-def _parse_espn_events(events, fallback_lg="Soccer"):
-    out = []
-    for ev in events:
-        comp = (ev.get("competitions") or [{}])[0]; cs = comp.get("competitors") or []
-        hc = next((c for c in cs if c.get("homeAway") == "home"), None)
-        ac = next((c for c in cs if c.get("homeAway") == "away"), None)
-        if not hc or not ac: continue
-        hn, an = (hc.get("team") or {}).get("displayName"), (ac.get("team") or {}).get("displayName")
-        if not hn or not an: continue
-        sti = (comp.get("status") or {}).get("type") or {}
-        o1, ox, o2, bk = extract_comp_odds(comp)
-        lgl = ev.get("leagues") or []
-        lgn = lgl[0].get("name") if lgl and isinstance(lgl[0], dict) else None
-        lg = (ev.get("season") or {}).get("slug") or lgn or fallback_lg
-        out.append({"DateTime": (ev.get("date") or "")[:16].replace("T", " "), "League": lg, "Home": hn, "Away": an, "Status": sti.get("shortDetail", "Scheduled"), "1": o1, "X": ox, "2": o2, "Bookie": bk, "LeagueId": None})
-    return out
-
-@st.cache_data(ttl=900, show_spinner=False)
-def load_espn_by_date(date_str):
-    last_err = ""
-    for host in ["site.api.espn.com", "site.web.api.espn.com"]:
-        try:
-            r = requests.get(f"https://{host}/apis/site/v2/sports/soccer/all/scoreboard?dates={date_str}", timeout=15)
-            if r.status_code == 200:
-                games = _parse_espn_events(r.json().get("events", []))
-                if games: return games, ""
-            else: last_err = f"HTTP {r.status_code}"
-        except Exception as e: last_err = str(e)
-    games, seen = [], set()
-    for name, slug in list(SCAN_LEAGUES.items()) + [("🌍 World Cup", "fifa.world"), ("🌍 AFCON", "caf.nations")]:
-        try:
-            r = requests.get(f"https://site.api.espn.com/apis/site/v2/sports/soccer/{slug}/scoreboard?dates={date_str}", timeout=8)
-            if r.status_code == 200:
-                for g in _parse_espn_events(r.json().get("events", []), name):
-                    k = (g["Home"], g["Away"])
-                    if k not in seen: seen.add(k); games.append(g)
-        except Exception: pass
-    return (games, "") if games else ([], f"No ESPN games found for {date_str} ({last_err or 'off-day'}).")
-
-@st.cache_data(ttl=1800)
-def load_espn(slug):
-    base = f"https://site.api.espn.com/apis/site/v2/sports/soccer/{slug}/scoreboard"
-    seen, fin, up = set(), [], {}
-    for w in [None, "202611", "202610", "202609", "202608"]:
-        try:
-            r = requests.get(base if w is None else f"{base}?dates={w}", timeout=12)
-            if r.status_code != 200: continue
-            for ev in r.json().get("events", []):
-                eid = ev.get("id")
-                if eid in seen: continue
-                seen.add(eid)
-                comp = (ev.get("competitions") or [{}])[0]; cs = comp.get("competitors") or []
-                hc = next((c for c in cs if c.get("homeAway") == "home"), None)
-                ac = next((c for c in cs if c.get("homeAway") == "away"), None)
-                if not hc or not ac: continue
-                hn, an = (hc.get("team") or {}).get("displayName"), (ac.get("team") or {}).get("displayName")
-                if not hn or not an: continue
-                dt = (ev.get("date") or "")[:10]
-                st_s = ((comp.get("status") or {}).get("type") or {}).get("state", "")
-                if st_s == "post":
-                    try: fin.append({"Date": dt, "HomeTeam": hn, "AwayTeam": an, "FTHG": int(float(hc.get("score") or 0)), "FTAG": int(float(ac.get("score") or 0))})
-                    except (ValueError, TypeError): pass
-                elif st_s == "pre":
-                    o1, ox, o2, bk = extract_comp_odds(comp)
-                    up[(dt, hn, an)] = (dt, hn, an, o1, ox, o2, bk)
-        except Exception: pass
-    df = pd.DataFrame(fin)
-    if not df.empty:
-        df["DateParsed"] = pd.to_datetime(df["Date"], errors="coerce")
-        df = df.sort_values("DateParsed").reset_index(drop=True)
-    return df, sorted(up.values(), key=lambda x: x[0])[:35], ""
-
-@st.cache_data(ttl=900)
-def load_goal_by_date(date_iso, key):
-    hdr = {"Authorization": f"Bearer {key.strip()}"}; items, err = [], ""
-    for off in [0, 100]:
-        try:
-            r = requests.get(f"https://api.goal-api.com/v1/fixtures/date/{date_iso}", params={"limit": 100, "offset": off}, headers=hdr, timeout=15)
-            if r.status_code == 401: return [], "❌ Invalid GOAL API key."
-            if r.status_code != 200: err = f"GOAL API {r.status_code}"; break
-            p = r.json(); data = p.get("data") or []; items.extend(data)
-            if not (p.get("pagination") or {}).get("hasMore", False) or len(data) < 100: break
-        except Exception as e: err = str(e); break
-    games = []
-    for m in items:
-        h, a = (m.get("homeTeam") or {}).get("name") or m.get("homeTeamName"), (m.get("awayTeam") or {}).get("name") or m.get("awayTeamName")
-        if not h or not a: continue
-        lg, lid = (m.get("league") or {}).get("name") or m.get("leagueName") or "League", (m.get("league") or {}).get("id") or m.get("leagueId")
-        games.append({"DateTime": (m.get("kickoffUtc") or date_iso)[:16].replace("T", " "), "League": lg, "Home": h, "Away": a, "Status": m.get("matchStatus") or "Scheduled", "1": None, "X": None, "2": None, "Bookie": "", "LeagueId": lid})
-    return games, ("" if items or not err else err)
-
-@st.cache_data(ttl=3600)
-def load_main_csv(code):
-    frames = []
-    for s in ["2526", "2627"]:
-        try: frames.append(pd.read_csv(f"https://www.football-data.co.uk/mmz4281/{s}/{code}.csv", encoding="latin1").dr
+def command_ai_multi(prov, key, games, cmd):
+    if not games: return "No upcoming games found in those leagues right now."
+    if prov == "Built-in Smart Advisor (No Key)" or not key.strip():
+        top = games[:5]
+        lines = [f"**🤖 Smart Multi-League Picks (Top {len(top)}):**\n"]
+        for i, g in enumerate(top, 1):
+            lines.append(f"{i}. **{g['Match']}** ({g['League']}, {g['Date']}) → Best Option: **{g['Safest']}** | Tip: `{g['Tip']}` ({g['Conf']}/10) | Combo: `{g['Combo']}` | Score: `{g['Score']}`")
+        return "\n".join(lines)
+    summary = "\n".join([f"- {g['Date']} | {g['League']} | {g['Match']} | Odds={g['Odds']} | Tip={g['Tip']}({g['Conf']}/10) | Safest={g['Safest']} | Combo={g['Combo']} | O/U={g['O/U 2.5']} | BTTS={g['BTTS']} | BestEV={g['BestEVSide']}({g['MaxEV']*100:+.0f}%)" for g in games[:30]])
+    sys_p = f"You are the user's personal football betting commander. Here are ALL analyzed upcoming games across their chosen leagues:\n{summary}\n\nSelect ONLY from these matches. Pick the best matches and best single/combo options for the user's command, explain why briefly with the numbers, and warn about any risk."
+    return ask_llm(prov, key, sys_p, [], cmd)
