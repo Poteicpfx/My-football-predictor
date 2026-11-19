@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 import requests
@@ -40,7 +41,7 @@ MAIN_LEAGUES = {
     "🏴 Scotland - Championship": "SC1", "🇪🇸 Spain - La Liga": "SP1", "🇪🇸 Spain - Segunda": "SP2",
     "🇩🇪 Germany - Bundesliga": "D1", "🇩🇪 Germany - 2. Bundesliga": "D2", "🇮🇹 Italy - Serie A": "I1",
     "🇮🇹 Italy - Serie B": "I2", "🇫🇷 France - Ligue 1": "F1", "🇫🇷 France - Ligue 2": "F2",
-    "🇳🇱 Netherlands - Eredivisie": "N1", "🇧🇪 Belgium - Pro League": "B1", "🇵🇹 Portugal - Liga": "P1",
+    "🇳🇱 Netherlands - Eredivisie": "N1", "🇧🇪 Belgium - Pro League": "B1", "🇵🇹 Portugal - Liga Portugal": "P1",
     "🇹🇷 Turkey - Super Lig": "T1", "🇬🇷 Greece - Super League": "G1",
 }
 WORLD_LEAGUES = {
@@ -52,11 +53,30 @@ WORLD_LEAGUES = {
     "🇨🇭 Switzerland - Super League": "SWZ",
 }
 
-# --- 2. SQLITE BET TRACKER ---
+def get_secret(name, default=""):
+    try: return str(st.secrets.get(name, default))
+    except Exception: return default
+
+# --- 2. SQLITE PERSISTENCE (BETS + APP MEMORY) ---
 def init_db():
     conn = sqlite3.connect("my_bets.db")
     conn.execute("CREATE TABLE IF NOT EXISTS bets (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, league TEXT, match_name TEXT, tip TEXT, confidence INTEGER, odds REAL, stake REAL, status TEXT DEFAULT 'Pending', profit REAL DEFAULT 0.0)")
+    conn.execute("CREATE TABLE IF NOT EXISTS app_state (key TEXT PRIMARY KEY, value TEXT)")
     conn.commit(); conn.close()
+
+def save_state(key, obj):
+    conn = sqlite3.connect("my_bets.db")
+    conn.execute("INSERT OR REPLACE INTO app_state (key, value) VALUES (?, ?)", (key, json.dumps(obj)))
+    conn.commit(); conn.close()
+
+def load_state(key, default):
+    conn = sqlite3.connect("my_bets.db")
+    row = conn.execute("SELECT value FROM app_state WHERE key = ?", (key,)).fetchone()
+    conn.close()
+    if row:
+        try: return json.loads(row[0])
+        except Exception: pass
+    return default
 
 def save_bet(league, match_name, tip, conf, odds, stake):
     conn = sqlite3.connect("my_bets.db")
@@ -298,6 +318,7 @@ def smart_advisor(res, q):
             f"🎯 **Best Pick:** **{mkts[0][0]}** (`{mkts[0][1]*100:.1f}%`) | **Combo:** `{res['Combo']}`\n\n"
             f"1. **{mkts[0][0]}** — `{mkts[0][1]*100:.1f}%`\n2. **{mkts[1][0]}** — `{mkts[1][1]*100:.1f}%`\n3. **{mkts[2][0]}** — `{mkts[2][1]*100:.1f}%`\n\n"
             f"💎 **Best Value:** `{bev_s}` (`{bev_v*100:+.1f}%` EV) | **Scores:** {', '.join(r['top_scores'])}")
+
 def ask_llm(provider, key, ctx, hist, q):
     sys_p = f"You are an expert football betting analyst. Use ONLY these stats to pick the best option, backup, and risk:\n{ctx}"
     k = key.strip()
@@ -321,52 +342,67 @@ def ask_llm(provider, key, ctx, hist, q):
         except Exception as e: err = str(e)
     return err
 
+# --- 6. RESTORE SAVED SESSION MEMORY ---
+prefs = load_state("prefs", {})
+if "daily_list" not in st.session_state:
+    st.session_state.daily_list = load_state("daily_list", [])
+if "ai_messages" not in st.session_state:
+    st.session_state.ai_messages = load_state("ai_messages", [])
 
-
-# --- 6. SIDEBAR ---
-if "daily_list" not in st.session_state: st.session_state.daily_list = []
-if "ai_messages" not in st.session_state: st.session_state.ai_messages = []
-
+# --- 7. SIDEBAR ---
 st.sidebar.header("🌍 Select Competition")
-mode = st.sidebar.radio("Category", [
+modes = [
     "🏆 UEFA, CAF, AFC, FIFA & Cups (No Key)",
     "⚽ 36 Global Leagues (No Key)",
     "🔎 All 1,000+ Competitions (GOAL API Key)",
-])
+]
+saved_mode = prefs.get("mode", modes[0])
+mode = st.sidebar.radio("Category", modes, index=modes.index(saved_mode) if saved_mode in modes else 0)
 
 df_league, upcoming_fixtures, selected_comp, load_err = pd.DataFrame(), [], "", ""
 
-if mode == "🏆 UEFA, CAF, AFC, FIFA & Cups (No Key)":
-    selected_comp = st.sidebar.selectbox("Tournament", list(ESPN_CUPS.keys()))
-    custom = st.sidebar.text_input("Or custom ESPN slug", placeholder="e.g. eng.1, esp.1")
+if mode == modes[0]:
+    keys = list(ESPN_CUPS.keys())
+    sc = prefs.get("comp", keys[0])
+    selected_comp = st.sidebar.selectbox("Tournament", keys, index=keys.index(sc) if sc in keys else 0)
+    custom = st.sidebar.text_input("Or custom ESPN slug", value=prefs.get("custom_slug", ""), placeholder="e.g. eng.1, esp.1")
     slug = custom.strip() if custom.strip() else ESPN_CUPS[selected_comp]
     if custom.strip(): selected_comp = f"Custom ({slug})"
     df_league, upcoming_fixtures, load_err = load_espn(slug)
-elif mode == "⚽ 36 Global Leagues (No Key)":
+elif mode == modes[1]:
     all_l = {**MAIN_LEAGUES, **WORLD_LEAGUES}
-    selected_comp = st.sidebar.selectbox("League", list(all_l.keys()))
+    keys = list(all_l.keys())
+    sc = prefs.get("comp", keys[0])
+    selected_comp = st.sidebar.selectbox("League", keys, index=keys.index(sc) if sc in keys else 0)
     code = all_l[selected_comp]
     df_league, upcoming_fixtures, load_err = load_main_csv(code) if selected_comp in MAIN_LEAGUES else load_world_csv(code)
 else:
-    gkey = st.sidebar.text_input("GOAL API Key (goal-api.com)", type="password")
-    qp = st.sidebar.selectbox("Presets", ["Custom Search", "Copa del Rey", "CAF Champions League", "NPFL", "UEFA Champions League", "UEFA Europa League", "AFC Champions League", "Saudi Pro League"])
-    sq = st.sidebar.text_input("Search ANY Competition", value="" if qp == "Custom Search" else qp)
+    gkey = st.sidebar.text_input("GOAL API Key (goal-api.com)", value=get_secret("GOAL_API_KEY", prefs.get("gkey", "")), type="password")
+    presets = ["Custom Search", "Copa del Rey", "CAF Champions League", "NPFL", "UEFA Champions League", "UEFA Europa League", "AFC Champions League", "Saudi Pro League"]
+    qp = st.sidebar.selectbox("Presets", presets)
+    sq_def = prefs.get("sq", "Premier League") if qp == "Custom Search" else qp
+    sq = st.sidebar.text_input("Search ANY Competition", value=sq_def)
     if gkey and sq:
         found = search_goal_leagues(sq, gkey)
         if found:
             opts = {f"{x.get('name')} ({(x.get('country') or {}).get('name', 'Intl')})": x.get("id") for x in found}
-            selected_comp = st.sidebar.selectbox("Pick Competition", list(opts.keys()))
+            okeys = list(opts.keys())
+            sc = prefs.get("comp", okeys[0])
+            selected_comp = st.sidebar.selectbox("Pick Competition", okeys, index=okeys.index(sc) if sc in okeys else 0)
             df_league, upcoming_fixtures, load_err = load_goal_fixtures(opts[selected_comp], gkey)
         else: st.sidebar.warning("No competition matched.")
-    else: st.sidebar.info("Enter free key from goal-api.com")
+    else: st.sidebar.info("Save GOAL_API_KEY in Secrets or paste it above.")
 
 st.sidebar.divider()
 st.sidebar.header("🤖 AI Space Settings")
-ai_prov = st.sidebar.selectbox("AI Engine", ["Built-in Smart Advisor (No Key)", "Groq (Free AI)", "Google Gemini (Free AI)"])
-ai_key = st.sidebar.text_input("Paste Free AI Key", type="password") if ai_prov != "Built-in Smart Advisor (No Key)" else ""
+ai_provs = ["Built-in Smart Advisor (No Key)", "Groq (Free AI)", "Google Gemini (Free AI)"]
+sp = prefs.get("ai_prov", ai_provs[0])
+ai_prov = st.sidebar.selectbox("AI Engine", ai_provs, index=ai_provs.index(sp) if sp in ai_provs else 0)
+sec_ai = get_secret("GROQ_API_KEY") if ai_prov == "Groq (Free AI)" else (get_secret("GEMINI_API_KEY") if ai_prov == "Google Gemini (Free AI)" else "")
+ai_key = st.sidebar.text_input("Paste Free AI Key", value=sec_ai, type="password") if ai_prov != ai_provs[0] else ""
 
-# --- 7. MAIN INTERFACE ---
-st.markdown('<div class="hero-banner"><h2 style="margin:0;color:#ecfdf5;">⚽ World Football Predictor Pro</h2><div style="color:#a7f3d0;font-size:0.9rem;">All Global Competitions • Full Analyzed Options • AI Betting Advisor</div></div>', unsafe_allow_html=True)
+# --- 8. MAIN INTERFACE ---
+st.markdown('<div class="hero-banner"><h2 style="margin:0;color:#ecfdf5;">⚽ World Football Predictor Pro</h2><div style="color:#a7f3d0;font-size:0.9rem;">All Global Competitions • Persistent Memory • AI Betting Advisor</div></div>', unsafe_allow_html=True)
 
 tab_board, tab_ai, tab_daily, tab_track = st.tabs(["🔍 Match Analyzer & All Games", "🤖 AI Space", "🔥 Daily Tips", "📒 Bet Tracker"])
 cur_res, cur_h2h = None, pd.DataFrame()
@@ -382,7 +418,6 @@ with tab_board:
     else:
         st.caption(f"**{selected_comp}** — Finished history: **{len(df_league)}** | Upcoming matches: **{len(upcoming_fixtures)}**")
 
-        # ALL UPCOMING MATCHES AUTO-ANALYZED BOARD
         if upcoming_fixtures:
             st.subheader(f"📋 All Upcoming Matches — Fully Analyzed ({len(upcoming_fixtures)})")
             rows = []
@@ -395,11 +430,13 @@ with tab_board:
             st.divider()
 
         st.subheader("🎯 Deep Match Analyzer & Custom Odds Check")
-        dh, da = 0, min(1, len(teams) - 1)
+        dh = teams.index(prefs["home_t"]) if prefs.get("home_t") in teams else 0
+        da = teams.index(prefs["away_t"]) if prefs.get("away_t") in teams else min(1, len(teams) - 1)
+
         if upcoming_fixtures:
-            labels = ["-- Pick Manually --"] + [f"{dt} | {h} vs {a}" for dt, h, a in upcoming_fixtures]
+            labels = ["-- Keep Selected / Manual --"] + [f"{dt} | {h} vs {a}" for dt, h, a in upcoming_fixtures]
             pick = st.selectbox("📅 Auto-Select Any Match Above", labels)
-            if pick != "-- Pick Manually --":
+            if pick != "-- Keep Selected / Manual --":
                 _, fh, fa = upcoming_fixtures[labels.index(pick) - 1]
                 if fh in teams and fa in teams: dh, da = teams.index(fh), teams.index(fa)
 
@@ -408,10 +445,16 @@ with tab_board:
         away_t = c2.selectbox("Away Team", teams, index=da)
 
         oc1, oc2, oc3, oc4 = st.columns([1, 1, 1, 1.3])
-        o1 = oc1.number_input("Odds 1", min_value=1.01, value=1.85, step=0.05)
-        ox = oc2.number_input("Odds X", min_value=1.01, value=3.50, step=0.05)
-        o2 = oc3.number_input("Odds 2", min_value=1.01, value=4.20, step=0.05)
-        stake = oc4.number_input("Stake", min_value=1.0, value=1000.0, step=100.0)
+        o1 = oc1.number_input("Odds 1", min_value=1.01, value=float(prefs.get("o1", 1.85)), step=0.05)
+        ox = oc2.number_input("Odds X", min_value=1.01, value=float(prefs.get("ox", 3.50)), step=0.05)
+        o2 = oc3.number_input("Odds 2", min_value=1.01, value=float(prefs.get("o2", 4.20)), step=0.05)
+        stake = oc4.number_input("Stake", min_value=1.0, value=float(prefs.get("stake", 1000.0)), step=100.0)
+
+        new_prefs = {"mode": mode, "comp": selected_comp, "home_t": home_t, "away_t": away_t,
+                     "o1": o1, "ox": ox, "o2": o2, "stake": stake, "ai_prov": ai_prov}
+        if mode == modes[2]: new_prefs["sq"] = sq
+        if new_prefs != prefs:
+            save_state("prefs", new_prefs)
 
         if home_t != away_t:
             res = analyze_fixture(df_league, home_t, away_t, o1, ox, o2)
@@ -429,12 +472,13 @@ with tab_board:
             b1, b2 = st.columns(2)
             if b1.button("➕ Add to Daily Tips", use_container_width=True):
                 rc = {k: v for k, v in res.items() if k != "_raw"}; rc["Competition"] = selected_comp
-                st.session_state.daily_list.append(rc); st.success("Added!")
+                st.session_state.daily_list.append(rc)
+                save_state("daily_list", st.session_state.daily_list)
+                st.success("Added & Saved!")
             podds = {"1": o1, "X": ox, "2": o2, "1X": round(1/(1/o1+1/ox), 2), "X2": round(1/(1/o2+1/ox), 2)}.get(res["Tip"], o1)
             if b2.button("💾 Save to Bet Tracker", use_container_width=True):
                 save_bet(selected_comp, res["Match"], res["Tip"], res["Conf"], podds, stake); st.success("Saved!")
 
-            st.markdown("**📊 All Analyzed Markets & Probabilities**")
             mk_df = pd.DataFrame({
                 "Result Market": ["Home Win (1)", "Draw (X)", "Away Win (2)", "Double Chance 1X", "Double Chance X2", "Double Chance 12"],
                 "Win %": [f"{raw['p1']*100:.1f}%", f"{raw['px']*100:.1f}%", f"{raw['p2']*100:.1f}%", f"{raw['p1x']*100:.1f}%", f"{raw['px2']*100:.1f}%", f"{raw['p12']*100:.1f}%"],
@@ -473,12 +517,15 @@ with tab_ai:
         if prompt:
             st.session_state.ai_messages.append({"role": "user", "content": prompt})
             with st.spinner("Analyzing..."):
-                rep = smart_advisor(cur_res, prompt) if (ai_prov == "Built-in Smart Advisor (No Key)" or not ai_key.strip()) else ask_llm(ai_prov, ai_key, ctx, st.session_state.ai_messages[:-1], prompt)
+                rep = smart_advisor(cur_res, prompt) if (ai_prov == ai_provs[0] or not ai_key.strip()) else ask_llm(ai_prov, ai_key, ctx, st.session_state.ai_messages[:-1], prompt)
             st.session_state.ai_messages.append({"role": "assistant", "content": rep})
+            save_state("ai_messages", st.session_state.ai_messages[-20:])
         for m in reversed(st.session_state.ai_messages):
             with st.chat_message(m["role"]): st.markdown(m["content"])
         if st.session_state.ai_messages and st.button("🧹 Clear Chat"):
-            st.session_state.ai_messages = []; st.rerun()
+            st.session_state.ai_messages = []
+            save_state("ai_messages", [])
+            st.rerun()
 
 with tab_daily:
     st.subheader("🔥 Daily Curated Tips")
@@ -492,7 +539,9 @@ with tab_daily:
         c2.markdown("### 💎 Value"); c2.dataframe(dd[dd["Category"].str.contains("Value")][["Match", "Category", "Score"]], hide_index=True)
         c3.markdown("### ⚖️ Draws"); c3.dataframe(dd[dd["Category"].str.contains("Draw")][["Match", "X", "Score"]], hide_index=True)
         if st.button("🗑️ Clear Daily List"):
-            st.session_state.daily_list = []; st.rerun()
+            st.session_state.daily_list = []
+            save_state("daily_list", [])
+            st.rerun()
 
 with tab_track:
     st.subheader("📒 My Bet History & ROI")
