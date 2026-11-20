@@ -3,6 +3,48 @@ import pandas as pd
 from scipy.stats import poisson
 from data_sources import *
 
+def compute_standings(df):
+    if df.empty or "HomeTeam" not in df.columns or "FTHG" not in df.columns:
+        return {}
+    tbl = {}
+    for _, r in df.iterrows():
+        h, a = r["HomeTeam"], r["AwayTeam"]
+        hg, ag = r["FTHG"], r["FTAG"]
+        for tm in (h, a):
+            if tm not in tbl:
+                tbl[tm] = {"pts": 0, "mp": 0, "gf": 0, "ga": 0, "gd": 0}
+        tbl[h]["mp"] += 1
+        tbl[a]["mp"] += 1
+        tbl[h]["gf"] += hg
+        tbl[h]["ga"] += ag
+        tbl[a]["gf"] += ag
+        tbl[a]["ga"] += hg
+        tbl[h]["gd"] += (hg - ag)
+        tbl[a]["gd"] += (ag - hg)
+        if hg > ag:
+            tbl[h]["pts"] += 3
+        elif hg == ag:
+            tbl[h]["pts"] += 1
+            tbl[a]["pts"] += 1
+        else:
+            tbl[a]["pts"] += 3
+    sorted_teams = sorted(
+        tbl.keys(),
+        key=lambda t: (tbl[t]["pts"], tbl[t]["gd"], tbl[t]["gf"]),
+        reverse=True
+    )
+    res = {}
+    for rank, t in enumerate(sorted_teams, 1):
+        s = tbl[t]
+        res[t] = {
+            "pos": rank,
+            "pts": s["pts"],
+            "mp": s["mp"],
+            "gd": s["gd"],
+            "badge": f"#{rank} ({s['pts']} pts, GD {s['gd']:+d})"
+        }
+    return res
+
 def get_metrics(df, team, venue="all", last_n=5):
     base = {"form":"-","gf":1.25,"ga":1.25,"o15":60,"o25":45,"o35":20,"btts":50,"corners":0.0,"shots_ot":0.0,"power":50.0}
     if df.empty: return base
@@ -27,7 +69,6 @@ def get_metrics(df, team, venue="all", last_n=5):
         if hc and pd.notna(r["HC"]) and pd.notna(r["AC"]): ct += r["HC"] if ih else r["AC"]
         if hs and pd.notna(r["HST"]) and pd.notna(r["AST"]): stt += r["HST"] if ih else r["AST"]
     n = len(g)
-    # Regression to mean: smooth small sample goals toward 1.25
     smooth_gf = (gft + 2.5) / (n + 2.0)
     smooth_ga = (gat + 2.5) / (n + 2.0)
     pwr = float(np.clip((pts / (n * 3)) * 60 + ((smooth_gf - smooth_ga)) * 12 + 20, 15, 90))
@@ -51,6 +92,10 @@ def dixon_coles_weight(i, j, eh, ea, rho=-0.08):
     return 1.0
 
 def analyze_fixture(df, home, away, o1=1.85, ox=3.50, o2=4.20):
+    standings = compute_standings(df)
+    h_pos = standings.get(home, {}).get("badge", "Pos: N/A")
+    a_pos = standings.get(away, {}).get("badge", "Pos: N/A")
+
     ha, aa = get_metrics(df, home, "all", 15), get_metrics(df, away, "all", 15)
     h5, a5 = get_metrics(df, home, "home", 5), get_metrics(df, away, "away", 5)
     if h5["form"] == "-" and ha["form"] != "-": h5 = ha
@@ -67,7 +112,6 @@ def analyze_fixture(df, home, away, o1=1.85, ox=3.50, o2=4.20):
     else:
         raw_eh = ((h5["gf"]*0.60 + ha["gf"]*0.40) / ahg) * ((a5["ga"]*0.60 + aa["ga"]*0.40) / ahg) * ahg
         raw_ea = ((a5["gf"]*0.60 + aa["gf"]*0.40) / aag) * ((h5["ga"]*0.60 + ha["ga"]*0.40) / aag) * aag
-        # Regress extreme xG back toward league averages (stops runaway 1.08 locks)
         eh = float(np.clip(raw_eh * 0.72 + ahg * 0.28, 0.55, 2.85))
         ea = float(np.clip(raw_ea * 0.72 + aag * 0.28, 0.45, 2.55))
 
@@ -76,17 +120,11 @@ def analyze_fixture(df, home, away, o1=1.85, ox=3.50, o2=4.20):
         for j in range(7):
             base_p = poisson.pmf(i, eh) * poisson.pmf(j, ea)
             mat[i, j] = base_p * dixon_coles_weight(i, j, eh, ea, -0.08)
-    
-    # Normalize probabilities to sum to exactly 1.0
     mat = mat / np.sum(mat)
 
-    p1 = float(np.sum(np.tril(mat, -1)))
+    p1 = min(float(np.sum(np.tril(mat, -1))), 0.78)
     px = float(np.sum(np.diag(mat)))
-    p2 = float(np.sum(np.triu(mat, 1)))
-
-    # Real-world cap: in league soccer, single-match win probability rarely exceeds 78%
-    p1 = min(p1, 0.78)
-    p2 = min(p2, 0.78)
+    p2 = min(float(np.sum(np.triu(mat, 1))), 0.78)
     tot = p1 + px + p2
     p1, px, p2 = p1/tot, px/tot, p2/tot
     p1x, px2, p12 = p1 + px, p2 + px, p1 + p2
@@ -102,7 +140,6 @@ def analyze_fixture(df, home, away, o1=1.85, ox=3.50, o2=4.20):
     probs = {"1": p1, "X": px, "2": p2}
     bp = max(probs, key=probs.get); bpr = probs[bp]
     
-    # Conservative Double Chance shift when outright win is below 54%
     if bp == "1" and bpr < 0.54 and p1x >= 0.70: tip, cp, mkt = "1X", p1x, "Double Chance"
     elif bp == "2" and bpr < 0.54 and px2 >= 0.70: tip, cp, mkt = "X2", px2, "Double Chance"
     else: tip, cp, mkt = bp, bpr, "Match Result (1X2)"
@@ -124,7 +161,7 @@ def analyze_fixture(df, home, away, o1=1.85, ox=3.50, o2=4.20):
     if conf >= 8 and {"1":o1,"X":ox,"2":o2}.get(bp, 1.45) <= 1.65: tags.append("Strong Edge")
     if bev >= 0.05: tags.append(f"+{bev*100:.0f}% EV ({bevs})")
     if px >= 0.28 and abs(h5["power"] - a5["power"]) <= 14: tags.append("Draw Risk")
-    verdict = f"xG: {home} {eh:.2f} vs {away} {ea:.2f} | Safest: {sn} ({sp_v*100:.0f}%) | Combo: {combo}"
+    verdict = f"{home} [{h_pos}] vs {away} [{a_pos}] | xG: {eh:.2f}-{ea:.2f} | Safest: {sn} ({sp_v*100:.0f}%) | Combo: {combo}"
     
     return {
         "Match": f"{home} vs {away}", "Market": mkt, "Tip": tip, "Prob": round(cp*100),
@@ -135,6 +172,7 @@ def analyze_fixture(df, home, away, o1=1.85, ox=3.50, o2=4.20):
         "Category": " • ".join(tags) if tags else "Standard",
         "_raw": {
             "home": home, "away": away, "eh": eh, "ea": ea,
+            "h_pos": h_pos, "a_pos": a_pos,
             "p1": p1, "px": px, "p2": p2, "p1x": p1x, "px2": px2, "p12": p12,
             "po15": po15, "po25": po25, "pu25": pu25, "pu35": pu35,
             "pbtts": pbtts, "png": png, "top_scores": ts, "verdict": verdict,
@@ -204,6 +242,7 @@ def build_ctx(res, h2h, comp):
     h2h_txt = "None" if h2h.empty else h2h.to_string(index=False)
     lines = [
         f"Comp: {comp} | Match: {res['Match']} | Odds: {res['1']}/{res['X']}/{res['2']}",
+        f"League Standing: {r['home']} [{r['h_pos']}] vs {r['away']} [{r['a_pos']}]",
         f"xG: {r['home']} {r['eh']:.2f} - {r['ea']:.2f} {r['away']}",
         f"1X2: 1={r['p1']*100:.1f}% X={r['px']*100:.1f}% 2={r['p2']*100:.1f}%",
         f"DC: 1X={r['p1x']*100:.1f}% X2={r['px2']*100:.1f}%",
@@ -217,12 +256,13 @@ def build_ctx(res, h2h, comp):
 def smart_advisor(res, q):
     r = res["_raw"]
     mkts = sorted([
-        (f"{r['home']} (1)", r["p1"]), ("Draw (X)", r["px"]), (f"{r['away']} (2)", r["p2"]),
+        (f"{r['home']} (1)", r["p1"]), ("Draw (X)", r["px"]), ("{r['away']} (2)", r["p2"]),
         ("1X", r["p1x"]), ("X2", r["px2"]), ("Over 1.5", r["po15"]), ("Over 2.5", r["po25"]),
         ("Under 2.5", r["pu25"]), ("Under 3.5", r["pu35"]), ("BTTS Yes", r["pbtts"]), ("BTTS No", r["png"]),
     ], key=lambda x: x[1], reverse=True)
     lines = [
         f"**Analytical Breakdown — {res['Match']}**",
+        f"🏆 Standings: {r['home']} [{r['h_pos']}] vs {r['away']} [{r['a_pos']}]",
         "",
         f"**Top Recommendation:** {mkts[0][0]} (`{mkts[0][1]*100:.1f}%`) | **Combo:** `{res['Combo']}`",
         "",
@@ -250,31 +290,4 @@ def ask_llm(prov, key, sys_p, hist, q):
                 err = f"Groq Error {r.status_code}: {r.text[:150]}"
             except Exception as e: err = str(e)
         return err
-    contents = [{"role":"user" if m["role"]=="user" else "model","parts":[{"text":m["content"]}]} for m in hist[-6:]] + [{"role":"user","parts":[{"text":q}]}]
-    err = ""
-    for m in ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-3.6-flash", "gemini-flash-latest"]:
-        try:
-            r = requests.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={k}",
-                headers={"Content-Type": "application/json"},
-                json={"system_instruction":{"parts":[{"text":sys_p}]},"contents":contents,"generationConfig":{"temperature":0.3}},
-                timeout=25,
-            )
-            if r.status_code == 200: return r.json()["candidates"][0]["content"]["parts"][0]["text"]
-            err = f"Gemini Error {r.status_code}: {r.text[:150]}"
-        except Exception as e: err = str(e)
-    return err
-
-def command_ai_multi(prov, key, games, cmd):
-    valid = [g for g in games if g.get("Data", "Stats") != "NoData"] or games
-    if not valid: return "No upcoming fixtures found to analyze."
-    if prov == "Built-in Smart Advisor (No Key)" or not key.strip():
-        top = valid[:6]
-        lines = [f"**Model Selection — Top {len(top)} Fixtures:**", ""]
-        for i, g in enumerate(top, 1):
-            lines.append(f"{i}. **{g['Match']}** ({g['League']} • {g['Date']}) → **{g['Safest']}** | {g['Market']}: `{g['Tip']}` ({g['Prob']}%, Conf {g['Conf']}/10)")
-        return "\n".join(lines)
-    rows = [f"- [{g.get('Data','Stats')}] {g['Date']} | {g['League']} | {g['Match']} | Odds={g['Odds']} | {g['Market']}={g['Tip']}({g['Prob']}%) | Safest={g['Safest']} | Combo={g['Combo']}" for g in valid[:35]]
-    summary = "\n".join(rows)
-    sys_p = f"You are a professional football analytics assistant. Review these analyzed fixtures:\n{summary}\n\nSelect ONLY from these matches (prefer [Stats] over [Odds]). Recommend the clearest selections, cite probabilities, and note key risks concisely."
-    return ask_llm(prov, key, sys_p, [], cmd)
+    contents = [{"role":"user" if m["role"]=="user" else "model","parts":[{"text":m["content"]}]} for
