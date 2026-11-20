@@ -8,7 +8,13 @@ ESPN_CUPS = {"🏆 UEFA Champions League": "uefa.champions", "🟠 UEFA Europa L
 SCAN_LEAGUES = {"🇬🇧 Premier League": "eng.1", "🇬🇧 Championship": "eng.2", "🇪🇸 La Liga": "esp.1", "🇩🇪 Bundesliga": "ger.1", "🇮🇹 Serie A": "ita.1", "🇫🇷 Ligue 1": "fra.1", "🇳🇱 Eredivisie": "ned.1", "🇵🇹 Liga Portugal": "por.1", "🏆 UEFA Champions League": "uefa.champions", "🟠 UEFA Europa League": "uefa.europa", "🟢 UEFA Conference League": "uefa.europa.conf", "🇪🇺 UEFA Nations League": "uefa.nations", "🇪🇸 Copa del Rey": "esp.copa_del_rey"}
 MAIN_LEAGUES = {"🇬🇧 England - Premier League": "E0", "🇬🇧 England - Championship": "E1", "🇬🇧 England - League 1": "E2", "🇬🇧 England - League 2": "E3", "🏴 Scotland - Premiership": "SC0", "🇪🇸 Spain - La Liga": "SP1", "🇪🇸 Spain - Segunda": "SP2", "🇩🇪 Germany - Bundesliga": "D1", "🇩🇪 Germany - 2. Bundesliga": "D2", "🇮🇹 Italy - Serie A": "I1", "🇮🇹 Italy - Serie B": "I2", "🇫🇷 France - Ligue 1": "F1", "🇫🇷 France - Ligue 2": "F2", "🇳🇱 Netherlands - Eredivisie": "N1", "🇧🇪 Belgium - Pro League": "B1", "🇵🇹 Portugal - Liga Portugal": "P1", "🇹🇷 Turkey - Super Lig": "T1", "🇬🇷 Greece - Super League": "G1"}
 WORLD_LEAGUES = {"🇦🇷 Argentina - Primera": "ARG", "🇧🇷 Brazil - Serie A": "BRA", "🇺🇸 USA - MLS": "USA", "🇲🇽 Mexico - Liga MX": "MEX", "🇯🇵 Japan - J-League": "JPN", "🇨🇳 China - Super League": "CHN", "🇦🇹 Austria - Bundesliga": "AUT", "🇩🇰 Denmark - Superliga": "DNK", "🇳🇴 Norway - Eliteserien": "NOR", "🇵🇱 Poland - Ekstraklasa": "POL", "🇸🇪 Sweden - Allsvenskan": "SWE", "🇨🇭 Switzerland - Super League": "SWZ"}
-CORE_ODDS_SPORTS = ["soccer_epl", "soccer_spain_la_liga", "soccer_germany_bundesliga", "soccer_italy_serie_a", "soccer_france_ligue_one", "soccer_uefa_champs_league", "soccer_uefa_europa_league", "soccer_uefa_europa_conference_league"]
+CORE_ODDS_SPORTS = [
+    "soccer_epl", "soccer_efl_champ", "soccer_spain_la_liga",
+    "soccer_germany_bundesliga", "soccer_italy_serie_a", "soccer_france_ligue_one",
+    "soccer_netherlands_eredivisie", "soccer_portugal_primeira_liga",
+    "soccer_uefa_champs_league", "soccer_uefa_europa_league",
+    "soccer_uefa_europa_conference_league",
+]
 
 def get_secret(name, default=""):
     try: return str(st.secrets.get(name, default))
@@ -82,14 +88,14 @@ def find_odds(h, a, od):
             return val
     return None
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=7200)
 def load_the_odds_api(key):
     if not key.strip(): return [], {}, ""
     evs, om, err = [], {}, ""
     for sk in CORE_ODDS_SPORTS:
         try:
             r = requests.get(f"https://api.the-odds-api.com/v4/sports/{sk}/odds", params={"apiKey": key.strip(), "regions": "eu", "markets": "h2h", "oddsFormat": "decimal"}, timeout=12)
-            if r.status_code == 401: return [], {}, "❌ Invalid The Odds API key (or monthly free quota finished)."
+            if r.status_code == 401: return [], {}, "Invalid The Odds API key (or monthly free quota finished)."
             if r.status_code != 200: err = f"Odds API {r.status_code}"; continue
             for ev in r.json():
                 h, a, bks = ev.get("home_team", ""), ev.get("away_team", ""), ev.get("bookmakers") or []
