@@ -1,324 +1,339 @@
-import numpy as np
+import streamlit as st
 import pandas as pd
-from scipy.stats import poisson
-from data_sources import *
+from datetime import datetime
+import predictor as pr
+import sporty_helper as sh
 
-def compute_standings(df):
-    if df.empty or "HomeTeam" not in df.columns or "FTHG" not in df.columns:
-        return {}
-    tbl = {}
-    for _, r in df.iterrows():
-        h, a = r["HomeTeam"], r["AwayTeam"]
-        hg, ag = r["FTHG"], r["FTAG"]
-        for tm in (h, a):
-            if tm not in tbl:
-                tbl[tm] = {"pts": 0, "mp": 0, "gf": 0, "ga": 0, "gd": 0}
-        tbl[h]["mp"] += 1
-        tbl[a]["mp"] += 1
-        tbl[h]["gf"] += hg
-        tbl[h]["ga"] += ag
-        tbl[a]["gf"] += ag
-        tbl[a]["ga"] += hg
-        tbl[h]["gd"] += (hg - ag)
-        tbl[a]["gd"] += (ag - hg)
-        if hg > ag:
-            tbl[h]["pts"] += 3
-        elif hg == ag:
-            tbl[h]["pts"] += 1
-            tbl[a]["pts"] += 1
+st.set_page_config(page_title="World Football Predictor Pro", page_icon="⚽", layout="wide")
+st.markdown("""<style>
+[data-testid="stAppViewContainer"]{background:radial-gradient(circle at 18% 15%,rgba(16,185,129,0.18),transparent 42%),radial-gradient(circle at 85% 20%,rgba(56,189,248,0.14),transparent 40%),linear-gradient(145deg,#040d0a 0%,#091722 50%,#050c14 100%);color:#f1f5f9;overflow-x:hidden;}
+.block-container{max-width:100%;overflow-x:hidden;}
+[data-testid="stHeader"]{background:rgba(4,13,10,0.55);backdrop-filter:blur(8px);}
+[data-testid="stSidebar"]{background:linear-gradient(180deg,#06131a 0%,#081c18 100%);border-right:1px solid rgba(16,185,129,0.25);}
+.hero-banner{background:linear-gradient(120deg,rgba(16,185,129,0.20),rgba(15,23,42,0.85));border:1px solid rgba(52,211,153,0.35);border-radius:14px;padding:12px 16px;margin-bottom:12px;}
+.glass-card{background:rgba(10,22,30,0.85);border:1px solid rgba(52,211,153,0.28);border-radius:12px;padding:12px 15px;margin-bottom:10px;width:100%;box-sizing:border-box;overflow-wrap:break-word;}
+.mcard{background:rgba(10,22,30,0.88);border:1px solid rgba(52,211,153,0.26);border-left:4px solid #10b981;border-radius:12px;padding:10px 13px;margin-bottom:9px;width:100%;box-sizing:border-box;overflow-wrap:break-word;}
+.mmeta{font-size:0.76rem;color:#94a3b8;margin-bottom:3px;}
+.mtitle{font-size:0.98rem;font-weight:700;color:#f8fafc;margin-bottom:6px;}
+.mfoot{font-size:0.80rem;color:#cbd5e1;margin-top:5px;}
+.prow{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0;}
+.p-green{background:rgba(16,185,129,0.20);color:#6ee7b7;border:1px solid rgba(16,185,129,0.45);border-radius:999px;padding:2px 9px;font-size:0.76rem;font-weight:700;}
+.p-blue{background:rgba(56,189,248,0.16);color:#7dd3fc;border:1px solid rgba(56,189,248,0.40);border-radius:999px;padding:2px 9px;font-size:0.76rem;font-weight:700;}
+.p-gold{background:rgba(245,158,11,0.18);color:#fcd34d;border:1px solid rgba(245,158,11,0.40);border-radius:999px;padding:2px 9px;font-size:0.76rem;font-weight:700;}
+.p-muted{background:rgba(148,163,184,0.14);color:#cbd5e1;border-radius:999px;padding:2px 9px;font-size:0.75rem;}
+[data-testid="stMetric"]{background:rgba(12,27,36,0.85);border:1px solid rgba(52,211,153,0.25);border-radius:10px;padding:8px 10px;}
+.stButton>button{background:linear-gradient(90deg,#059669,#10b981);color:#fff;border:none;border-radius:8px;font-weight:700;}
+</style>""", unsafe_allow_html=True)
+
+pr.init_db()
+prefs = pr.load_state("prefs", {})
+if "daily_list" not in st.session_state: st.session_state.daily_list = pr.load_state("daily_list", [])
+if "ai_messages" not in st.session_state: st.session_state.ai_messages = pr.load_state("ai_messages", [])
+if "cmd_result" not in st.session_state: st.session_state.cmd_result = ""
+if "cmd_games" not in st.session_state: st.session_state.cmd_games = []
+
+st.sidebar.header("🔑 Keys (Secrets)")
+gkey = st.sidebar.text_input("GOAL API Key", value=pr.get_secret("GOAL_API_KEY", prefs.get("gkey", "")), type="password")
+okey = st.sidebar.text_input("The Odds API Key", value=pr.get_secret("ODDS_API_KEY", prefs.get("okey", "")), type="password")
+
+st.sidebar.divider()
+st.sidebar.header("🌍 League Analyzer Source")
+modes = ["🏆 UEFA, CAF, AFC, FIFA & Cups", "⚽ 30 Global Leagues", "🔎 All 1,000+ Leagues (GOAL API)"]
+sm = prefs.get("mode", modes[0])
+mode = st.sidebar.radio("Category", modes, index=modes.index(sm) if sm in modes else 0)
+
+df_league, upcoming_fixtures, selected_comp, load_err = pd.DataFrame(), [], "", ""
+if mode == modes[0]:
+    ks = list(pr.ESPN_CUPS.keys()); sc = prefs.get("comp", ks[0])
+    selected_comp = st.sidebar.selectbox("Tournament", ks, index=ks.index(sc) if sc in ks else 0)
+    custom = st.sidebar.text_input("Or ESPN slug", placeholder="eng.1, esp.1")
+    slug = custom.strip() if custom.strip() else pr.ESPN_CUPS[selected_comp]
+    if custom.strip(): selected_comp = f"Custom ({slug})"
+    df_league, upcoming_fixtures, load_err = pr.load_espn(slug)
+elif mode == modes[1]:
+    all_l = {**pr.MAIN_LEAGUES, **pr.WORLD_LEAGUES}; ks = list(all_l.keys()); sc = prefs.get("comp", ks[0])
+    selected_comp = st.sidebar.selectbox("League", ks, index=ks.index(sc) if sc in ks else 0)
+    code = all_l[selected_comp]
+    df_league, upcoming_fixtures, load_err = pr.load_main_csv(code) if selected_comp in pr.MAIN_LEAGUES else pr.load_world_csv(code)
+else:
+    presets = ["Custom Search", "Copa del Rey", "CAF Champions League", "NPFL", "UEFA Champions League", "UEFA Europa League"]
+    qp = st.sidebar.selectbox("Presets", presets)
+    sq = st.sidebar.text_input("Search Competition", value=prefs.get("sq", "Premier League") if qp == "Custom Search" else qp)
+    if gkey and sq:
+        found = pr.search_goal_leagues(sq, gkey)
+        if found:
+            opts = {f"{x.get('name')} ({(x.get('country') or {}).get('name', 'Intl')})": x.get("id") for x in found}
+            oks = list(opts.keys()); sc = prefs.get("comp", oks[0])
+            selected_comp = st.sidebar.selectbox("Pick Competition", oks, index=oks.index(sc) if sc in oks else 0)
+            df_league, upcoming_fixtures, load_err = pr.load_goal_fixtures(opts[selected_comp], gkey)
+        else: st.sidebar.warning("No competition matched.")
+    else: st.sidebar.info("Enter GOAL API Key above.")
+
+st.sidebar.divider()
+st.sidebar.header("🤖 AI Settings")
+ai_provs = ["Built-in Smart Advisor (No Key)", "Groq (Free AI)", "Google Gemini (Free AI)"]
+sp = prefs.get("ai_prov", ai_provs[0])
+ai_prov = st.sidebar.selectbox("AI Engine", ai_provs, index=ai_provs.index(sp) if sp in ai_provs else 0)
+sec_ai = pr.get_secret("GROQ_API_KEY") if ai_prov == "Groq (Free AI)" else (pr.get_secret("GEMINI_API_KEY") if ai_prov == "Google Gemini (Free AI)" else "")
+ai_key = st.sidebar.text_input("Free AI Key", value=sec_ai, type="password") if ai_prov != ai_provs[0] else ""
+odds_events, odds_dict, odds_err = pr.load_the_odds_api(okey)
+
+st.markdown('<div class="hero-banner"><h2 style="margin:0;color:#ecfdf5;">⚽ World Football Predictor Pro</h2><div style="color:#a7f3d0;font-size:0.88rem;">Live Standings • Dixon-Coles Probability • AI Commander • SportyBet Slip</div></div>', unsafe_allow_html=True)
+tab_date, tab_board, tab_ai, tab_daily, tab_track = st.tabs(["📅 By Date", "🔍 League", "🤖 AI Commander", "🎟️ SportyBet Slip", "📒 Tracker"])
+cur_res, cur_h2h, cur_comp = None, pd.DataFrame(), selected_comp
+
+with tab_date:
+    dc1, dc2, dc3 = st.columns([1.2, 2, 0.8])
+    picked_date = dc1.date_input("Match Date", value=datetime.now().date())
+    date_feed = dc2.selectbox("Date Feed", ["🌍 Major Games (ESPN Free)", "🔎 All 1,000+ Leagues (GOAL API)", "💎 Live Bookie Card (The Odds API)"])
+    if dc3.button("🔄 Refresh"): st.cache_data.clear(); st.rerun()
+    date_games, d_err = [], ""
+    if date_feed.startswith("🌍"): date_games, d_err = pr.load_espn_by_date(picked_date.strftime("%Y%m%d"))
+    elif date_feed.startswith("🔎"):
+        if not gkey: st.warning("Paste your GOAL API Key in Sidebar/Secrets.")
+        else: date_games, d_err = pr.load_goal_by_date(picked_date.strftime("%Y-%m-%d"), gkey)
+    else:
+        if not okey: st.warning("Paste your The Odds API key in Sidebar/Secrets.")
+        else: date_games = [e for e in odds_events if e["DateTime"].startswith(picked_date.strftime("%Y-%m-%d"))] or odds_events
+    if d_err: st.warning(d_err)
+    if odds_err: st.warning(odds_err)
+    for g in date_games:
+        if (not g["1"] or not g["X"] or not g["2"]) and odds_dict:
+            fd = pr.find_odds(g["Home"], g["Away"], odds_dict)
+            if fd: g["1"], g["X"], g["2"], g["Bookie"] = fd
+    if not date_games: st.info("No matches found for this date.")
+    else:
+        ml = ["-- Pick a Match to Analyze --"] + [f"{g['League']} | {g['Home']} vs {g['Away']}" for g in date_games]
+        cm = st.selectbox("🎯 Analyze Any Match From This Date", ml)
+        if cm != ml[0]:
+            g = date_games[ml.index(cm)-1]
+            df_mh = pr.load_goal_fixtures(g["LeagueId"], gkey)[0] if (g.get("LeagueId") and gkey) else pd.DataFrame()
+            o1a, oxa, o2a = float(g["1"] or 1.90), float(g["X"] or 3.40), float(g["2"] or 3.90)
+            rd = pr.analyze_fixture(df_mh, g["Home"], g["Away"], o1a, oxa, o2a); rwd = rd["_raw"]
+            cur_res, cur_h2h, cur_comp = rd, pr.get_h2h(df_mh, g["Home"], g["Away"]), g["League"]
+
+            h_p = rwd.get("h_pos", "Pos: N/A")
+            a_p = rwd.get("a_pos", "Pos: N/A")
+            if h_p != "Pos: N/A" and a_p != "Pos: N/A":
+                st.markdown(f'<div class="glass-card"><b>🏆 Standings:</b> {g["Home"]} <span class="p-green">{h_p}</span> vs {g["Away"]} <span class="p-blue">{a_p}</span></div>', unsafe_allow_html=True)
+
+            m1,m2,m3,m4,m5 = st.columns(5)
+            m1.metric("Tip", f"{rd['Tip']} ({rd['Conf']}/10)"); m2.metric("Safest", rd["Safest"]); m3.metric("Combo", rd["Combo"]); m4.metric("O/U & BTTS", f"{rd['O/U 2.5']} | {rd['BTTS']}"); m5.metric("Odds", f"{o1a}/{oxa}/{o2a}")
+            st.markdown(f'<div class="glass-card"><b>🧠 Verdict:</b> {rwd["verdict"]} | <b>Scores:</b> {", ".join(rwd["top_scores"])}</div>', unsafe_allow_html=True)
+            b1, b2 = st.columns(2)
+            if b1.button("🎟️ Add to SportyBet Slip", key="d_add", use_container_width=True):
+                rc = {k:v for k,v in rd.items() if k!="_raw"}; rc["Competition"] = g["League"]
+                st.session_state.daily_list.append(rc); pr.save_state("daily_list", st.session_state.daily_list); st.success("Added!")
+            pod = {"1":o1a,"X":oxa,"2":o2a,"1X":round(1/(1/o1a+1/oxa),2),"X2":round(1/(1/o2a+1/oxa),2)}.get(rd["Tip"], o1a)
+            if b2.button("💾 Save to Tracker", key="d_save", use_container_width=True):
+                pr.save_bet(g["League"], rd["Match"], rd["Tip"], rd["Conf"], pod, float(prefs.get("stake", 1000.0))); st.success("Saved!")
+        st.caption(f"Showing **{min(len(date_games), 40)}** of **{len(date_games)}** matches")
+        st.markdown(sh.render_date_cards(date_games[:40]), unsafe_allow_html=True)
+
+with tab_board:
+    if load_err: st.error(load_err)
+    ht = (set(df_league["HomeTeam"].unique()) | set(df_league["AwayTeam"].unique())) if not df_league.empty else set()
+    teams = sorted(ht | {t for item in upcoming_fixtures for t in (item[1], item[2])})
+    if not teams: st.info("Pick a league/cup in the left sidebar.")
+    else:
+        st.caption(f"**{selected_comp}** — Finished: **{len(df_league)}** | Upcoming: **{len(upcoming_fixtures)}**")
+        dh = teams.index(prefs["home_t"]) if prefs.get("home_t") in teams else 0
+        da = teams.index(prefs["away_t"]) if prefs.get("away_t") in teams else min(1, len(teams)-1)
+        if upcoming_fixtures:
+            lbs = ["-- Manual / Saved --"] + [f"{x[0]} | {x[1]} vs {x[2]}" for x in upcoming_fixtures]
+            pk = st.selectbox("📅 Pick Match for Deep Check", lbs)
+            if pk != lbs[0]:
+                _, fh, fa, *_ = upcoming_fixtures[lbs.index(pk)-1]
+                if fh in teams and fa in teams: dh, da = teams.index(fh), teams.index(fa)
+        c1, c2 = st.columns(2)
+        home_t = c1.selectbox("Home Team", teams, index=dh); away_t = c2.selectbox("Away Team", teams, index=da)
+        ao = pr.find_odds(home_t, away_t, odds_dict)
+        do1, dox, do2 = (ao[0], ao[1], ao[2]) if ao else (float(prefs.get("o1",1.85)), float(prefs.get("ox",3.50)), float(prefs.get("o2",4.20)))
+        if ao: st.success(f"⚡ Live odds ({ao[3]}): `{do1}/{dox}/{do2}`")
+        oc1, oc2, oc3, oc4 = st.columns([1,1,1,1.3])
+        o1 = oc1.number_input("Odds 1", min_value=1.01, value=float(do1), step=0.05)
+        ox = oc2.number_input("Odds X", min_value=1.01, value=float(dox), step=0.05)
+        o2 = oc3.number_input("Odds 2", min_value=1.01, value=float(do2), step=0.05)
+        stake = oc4.number_input("Stake (₦)", min_value=1.0, value=float(prefs.get("stake",1000.0)), step=100.0)
+        nprefs = {"mode":mode,"comp":selected_comp,"home_t":home_t,"away_t":away_t,"o1":o1,"ox":ox,"o2":o2,"stake":stake,"ai_prov":ai_prov}
+        if mode == modes[2]: nprefs["sq"] = sq
+        if nprefs != prefs: pr.save_state("prefs", nprefs)
+        if home_t != away_t:
+            res = pr.analyze_fixture(df_league, home_t, away_t, o1, ox, o2); raw = res["_raw"]
+            if cur_res is None: cur_res, cur_h2h, cur_comp = res, pr.get_h2h(df_league, home_t, away_t), selected_comp
+
+            # Display Live League Standings Safely
+            hp = raw.get("h_pos", "Pos: N/A")
+            ap = raw.get("a_pos", "Pos: N/A")
+            if hp != "Pos: N/A" and ap != "Pos: N/A":
+                st.markdown(f'<div class="glass-card"><b>🏆 League Position:</b> {home_t} <span class="p-green"><b>{hp}</b></span> &nbsp;vs&nbsp; {away_t} <span class="p-blue"><b>{ap}</b></span></div>', unsafe_allow_html=True)
+
+            m1,m2,m3,m4,m5 = st.columns(5)
+            m1.metric("Tip", f"{res['Tip']} ({res['Conf']}/10)"); m2.metric("Safest", res["Safest"]); m3.metric("Combo", res["Combo"]); m4.metric("O/U & BTTS", f"{res['O/U 2.5']} | {res['BTTS']}"); m5.metric("Score", res["Score"])
+            st.markdown(f'<div class="glass-card"><b>🧠 Verdict ({res["Category"]}):</b> {raw["verdict"]}<br><b>Top 3 Scores:</b> {", ".join(raw["top_scores"])}</div>', unsafe_allow_html=True)
+            b1, b2 = st.columns(2)
+            if b1.button("🎟️ Add to SportyBet Slip", use_container_width=True):
+                rc = {k:v for k,v in res.items() if k!="_raw"}; rc["Competition"] = selected_comp
+                st.session_state.daily_list.append(rc); pr.save_state("daily_list", st.session_state.daily_list); st.success("Added to SportyBet Slip tab!")
+            podds = {"1":o1,"X":ox,"2":o2,"1X":round(1/(1/o1+1/ox),2),"X2":round(1/(1/o2+1/ox),2)}.get(res["Tip"], o1)
+            if b2.button("💾 Save to Tracker", use_container_width=True):
+                pr.save_bet(selected_comp, res["Match"], res["Tip"], res["Conf"], podds, stake); st.success("Saved!")
+            ch, ca = st.columns(2); h5, a5 = raw["h5"], raw["a5"]
+            hb = f" [{hp}]" if hp != "Pos: N/A" else ""
+            ab = f" [{ap}]" if ap != "Pos: N/A" else ""
+            ch.info(f"🏠 **{home_t}{hb}:** Form `{h5['form']}` | Power `{h5['power']}` | GF `{h5['gf']}` GA `{h5['ga']}`")
+            ca.info(f"✈️ **{away_t}{ab}:** Form `{a5['form']}` | Power `{a5['power']}` | GF `{a5['gf']}` GA `{a5['ga']}`")
+        if upcoming_fixtures:
+            st.divider(); st.subheader("📋 Upcoming Analyzed Games")
+            rows = []
+            for dt, fh, fa, eo1, eox, eo2, _ in upcoming_fixtures:
+                fo = pr.find_odds(fh, fa, odds_dict); has_o = bool(fo or eo1)
+                u1, ux, u2 = (fo[0], fo[1], fo[2]) if fo else (eo1 or 1.85, eox or 3.50, eo2 or 4.20)
+                a = pr.analyze_fixture(df_league, fh, fa, u1, ux, u2)
+                rows.append({"Date":dt,"Match":a["Match"],"1/X/2":f"{u1}/{ux}/{u2}" if has_o else "-","Tip":a["Tip"],"Conf":a["Conf"],"Safest":a["Safest"],"Combo":a["Combo"],"O/U 2.5":a["O/U 2.5"],"BTTS":a["BTTS"],"Score":a["Score"]})
+            st.markdown(sh.render_analysis_cards(rows), unsafe_allow_html=True)
+
+with tab_ai:
+    ai_mode = st.radio("AI Mode", ["📅 Daily 1,000+ Leagues (GOAL API)", "🌍 Top Leagues (ESPN)", "🎯 Active Match Chat"], horizontal=True)
+    if ai_mode.startswith("📅"):
+        if not gkey: st.warning("Save or paste your GOAL API Key in Sidebar/Secrets.")
         else:
-            tbl[a]["pts"] += 3
-    sorted_teams = sorted(
-        tbl.keys(),
-        key=lambda t: (tbl[t]["pts"], tbl[t]["gd"], tbl[t]["gf"]),
-        reverse=True
-    )
-    res = {}
-    for rank, t in enumerate(sorted_teams, 1):
-        s = tbl[t]
-        res[t] = {
-            "pos": rank,
-            "pts": s["pts"],
-            "mp": s["mp"],
-            "gd": s["gd"],
-            "badge": "#" + str(rank) + " (" + str(s["pts"]) + " pts, GD " + "{:+d}".format(s["gd"]) + ")"
-        }
-    return res
-
-def get_metrics(df, team, venue="all", last_n=5):
-    base = {"form":"-","gf":1.25,"ga":1.25,"o15":60,"o25":45,"o35":20,"btts":50,"corners":0.0,"shots_ot":0.0,"power":50.0}
-    if df.empty: return base
-    if venue == "home": g = df[df["HomeTeam"] == team].tail(last_n)
-    elif venue == "away": g = df[df["AwayTeam"] == team].tail(last_n)
-    else: g = df[(df["HomeTeam"] == team) | (df["AwayTeam"] == team)].tail(last_n)
-    if g.empty: return base
-    fm, gft, gat, o15, o25, o35, bt, ct, stt, pts = [], 0, 0, 0, 0, 0, 0, 0, 0, 0
-    hc = "HC" in g.columns and "AC" in g.columns
-    hs = "HST" in g.columns and "AST" in g.columns
-    for _, r in g.iterrows():
-        ih = r["HomeTeam"] == team
-        gf, ga = (r["FTHG"], r["FTAG"]) if ih else (r["FTAG"], r["FTHG"])
-        gft += gf; gat += ga; tot = gf + ga
-        if gf > ga: fm.append("W"); pts += 3
-        elif gf == ga: fm.append("D"); pts += 1
-        else: fm.append("L")
-        if tot > 1: o15 += 1
-        if tot > 2: o25 += 1
-        if tot > 3: o35 += 1
-        if gf > 0 and ga > 0: bt += 1
-        if hc and pd.notna(r["HC"]) and pd.notna(r["AC"]): ct += r["HC"] if ih else r["AC"]
-        if hs and pd.notna(r["HST"]) and pd.notna(r["AST"]): stt += r["HST"] if ih else r["AST"]
-    n = len(g)
-    smooth_gf = (gft + 2.5) / (n + 2.0)
-    smooth_ga = (gat + 2.5) / (n + 2.0)
-    pwr = float(np.clip((pts / (n * 3)) * 60 + ((smooth_gf - smooth_ga)) * 12 + 20, 15, 90))
-    return {
-        "form": "".join(fm), "gf": round(smooth_gf, 2), "ga": round(smooth_ga, 2),
-        "o15": round(o15/n*100), "o25": round(o25/n*100), "o35": round(o35/n*100),
-        "btts": round(bt/n*100), "corners": round(ct/n, 1) if hc else 0.0,
-        "shots_ot": round(stt/n, 1) if hs else 0.0, "power": round(pwr, 1),
-    }
-
-def get_h2h(df, h, a):
-    if df.empty: return pd.DataFrame()
-    q = df[((df["HomeTeam"] == h) & (df["AwayTeam"] == a)) | ((df["HomeTeam"] == a) & (df["AwayTeam"] == h))].tail(5)
-    return pd.DataFrame() if q.empty else q[["Date", "HomeTeam", "FTHG", "FTAG", "AwayTeam"]].iloc[::-1]
-
-def dixon_coles_weight(i, j, eh, ea, rho=-0.08):
-    if i == 0 and j == 0: return max(0.1, 1.0 - eh * ea * rho)
-    if i == 0 and j == 1: return max(0.1, 1.0 + eh * rho)
-    if i == 1 and j == 0: return max(0.1, 1.0 + ea * rho)
-    if i == 1 and j == 1: return max(0.1, 1.0 - rho)
-    return 1.0
-
-def analyze_fixture(df, home, away, o1=1.85, ox=3.50, o2=4.20):
-    standings = compute_standings(df)
-    h_pos = standings.get(home, {}).get("badge", "Pos: N/A")
-    a_pos = standings.get(away, {}).get("badge", "Pos: N/A")
-
-    ha, aa = get_metrics(df, home, "all", 15), get_metrics(df, away, "all", 15)
-    h5, a5 = get_metrics(df, home, "home", 5), get_metrics(df, away, "away", 5)
-    if h5["form"] == "-" and ha["form"] != "-": h5 = ha
-    if a5["form"] == "-" and aa["form"] != "-": a5 = aa
-    
-    ahg = max(float(df["FTHG"].mean()), 0.6) if not df.empty else 1.35
-    aag = max(float(df["FTAG"].mean()), 0.5) if not df.empty else 1.15
-
-    if h5["form"] == "-" and a5["form"] == "-" and o1 > 1.01 and ox > 1.01 and o2 > 1.01:
-        si = (1/o1) + (1/ox) + (1/o2)
-        p1_imp = (1/o1) / si
-        p2_imp = (1/o2) / si
-        eh = float(np.clip(0.85 + p1_imp * 1.55, 0.6, 2.75))
-        ea = float(np.clip(0.70 + p2_imp * 1.45, 0.5, 2.50))
+            cmd_dt = st.date_input("Date to Scan", value=datetime.now().date(), key="cmd_dt")
+            raw_day, day_err = pr.load_goal_by_date(cmd_dt.strftime("%Y-%m-%d"), gkey)
+            if day_err: st.warning(day_err)
+            avail_up = [g for g in raw_day if not g.get("IsFinished")]
+            avail_lgs = sorted({g["League"] for g in avail_up})
+            st.caption(f"**{len(avail_up)}** playable games across **{len(avail_lgs)}** leagues")
+            picked_dlgs = st.multiselect("Filter Leagues (blank = top 20)", avail_lgs, key="cmd_dlgs")
+            cc = st.columns(3); qcmd = None
+            if cc[0].button("🎯 Top 5 Picks", key="d_c1", use_container_width=True): qcmd = "Pick the 5 safest games and give the best option for each."
+            if cc[1].button("🔒 4-Leg Acca", key="d_c2", use_container_width=True): qcmd = "Build a 4-leg accumulator using the safest Double Chance or Over 1.5 options."
+            if cc[2].button("⚽ Goals/BTTS", key="d_c3", use_container_width=True): qcmd = "Pick the best Over 1.5, Over 2.5, or BTTS options."
+            with st.form("daily_cmd_form", clear_on_submit=False):
+                tcmd = st.text_input("Command AI:", placeholder="e.g. Pick 4 safest games and best options")
+                csub = st.form_submit_button("Analyze Date & Command AI 🚀")
+            cmd_txt = qcmd if qcmd else (tcmd.strip() if csub and tcmd.strip() else None)
+            if cmd_txt:
+                with st.spinner("Scanning & deep-analyzing today's leagues..."):
+                    games, gerr = pr.scan_goal_date_games(cmd_dt.strftime("%Y-%m-%d"), gkey, odds_dict, picked_dlgs or None, True, 20)
+                    if gerr: st.error(gerr)
+                    st.session_state.cmd_games = games
+                    st.session_state.cmd_result = pr.command_ai_multi(ai_prov, ai_key, games, cmd_txt)
+                    if games and not st.session_state.daily_list:
+                        st.session_state.daily_list = games[:4]; pr.save_state("daily_list", st.session_state.daily_list)
+    elif ai_mode.startswith("🌍"):
+        picked_lgs = st.multiselect("Choose Leagues", list(pr.SCAN_LEAGUES.keys()), default=["🇬🇧 Premier League", "🇪🇸 La Liga", "🏆 UEFA Champions League", "🟠 UEFA Europa League"])
+        cc = st.columns(3); qcmd = None
+        if cc[0].button("🎯 Top 3 Safest", key="e_c1", use_container_width=True): qcmd = "Pick the 3 safest matches and best option for each."
+        if cc[1].button("🔥 4-Leg Acca", key="e_c2", use_container_width=True): qcmd = "Build a 4-leg accumulator using safest Double Chance or Over 1.5."
+        if cc[2].button("💎 Value Bets", key="e_c3", use_container_width=True): qcmd = "Find best +EV picks."
+        with st.form("cmd_form", clear_on_submit=False):
+            tcmd = st.text_input("Command AI:", placeholder="e.g. Pick 3 safest games")
+            csub = st.form_submit_button("Run AI Commander 🚀")
+        cmd_text = qcmd if qcmd else (tcmd.strip() if csub and tcmd.strip() else None)
+        if cmd_text and picked_lgs:
+            with st.spinner("Scanning leagues..."):
+                games = pr.scan_selected_leagues(picked_lgs, odds_dict)
+                st.session_state.cmd_games = games
+                st.session_state.cmd_result = pr.command_ai_multi(ai_prov, ai_key, games, cmd_text)
+                if games and not st.session_state.daily_list:
+                    st.session_state.daily_list = games[:4]; pr.save_state("daily_list", st.session_state.daily_list)
     else:
-        raw_eh = ((h5["gf"]*0.60 + ha["gf"]*0.40) / ahg) * ((a5["ga"]*0.60 + aa["ga"]*0.40) / ahg) * ahg
-        raw_ea = ((a5["gf"]*0.60 + aa["gf"]*0.40) / aag) * ((h5["ga"]*0.60 + ha["ga"]*0.40) / aag) * aag
-        eh = float(np.clip(raw_eh * 0.72 + ahg * 0.28, 0.55, 2.85))
-        ea = float(np.clip(raw_ea * 0.72 + aag * 0.28, 0.45, 2.55))
+        if cur_res is None: st.info("Select a match in **By Date** or **League** first.")
+        else:
+            st.success(f"**Active:** {cur_res['Match']} ({cur_comp}) | Tip: `{cur_res['Tip']}` | Odds: `{cur_res['1']}/{cur_res['X']}/{cur_res['2']}`")
+            ctx = pr.build_ctx(cur_res, cur_h2h, cur_comp)
+            qc = st.columns(4); qq = None
+            if qc[0].button("🎯 Best Pick", use_container_width=True): qq = "Select the single best option and explain why."
+            if qc[1].button("🔒 Safest", use_container_width=True): qq = "What is the safest accumulator option?"
+            if qc[2].button("💎 Value", use_container_width=True): qq = "Which option gives the best value?"
+            if qc[3].button("⚽ Goals", use_container_width=True): qq = "Pick the best Over/Under or BTTS option."
+            with st.form("ai_form", clear_on_submit=True):
+                tq = st.text_input("Ask AI:", placeholder="Ask about this match...")
+                sub = st.form_submit_button("Ask AI 🚀")
+            prompt = qq if qq else (tq.strip() if sub and tq.strip() else None)
+            if prompt:
+                st.session_state.ai_messages.append({"role":"user","content":prompt})
+                with st.spinner("Analyzing..."):
+                    sys_p = f"You are an expert football analyst. Use ONLY these stats:\n{ctx}"
+                    rep = pr.smart_advisor(cur_res, prompt) if (ai_prov==ai_provs[0] or not ai_key.strip()) else pr.ask_llm(ai_prov, ai_key, sys_p, st.session_state.ai_messages[:-1], prompt)
+                st.session_state.ai_messages.append({"role":"assistant","content":rep}); pr.save_state("ai_messages", st.session_state.ai_messages[-20:])
+            for m in reversed(st.session_state.ai_messages):
+                with st.chat_message(m["role"]): st.markdown(m["content"])
+            if st.session_state.ai_messages and st.button("🧹 Clear Chat"): st.session_state.ai_messages = []; pr.save_state("ai_messages", []); st.rerun()
 
-    mat = np.zeros((7, 7))
-    for i in range(7):
-        for j in range(7):
-            base_p = poisson.pmf(i, eh) * poisson.pmf(j, ea)
-            mat[i, j] = base_p * dixon_coles_weight(i, j, eh, ea, -0.08)
-    mat = mat / np.sum(mat)
+    if not ai_mode.startswith("🎯"):
+        if st.session_state.cmd_result: st.markdown(f'<div class="glass-card">{st.session_state.cmd_result}</div>', unsafe_allow_html=True)
+        if st.session_state.cmd_games:
+            sc1, sc2 = st.columns([1, 2])
+            legs_n = sc1.number_input("Legs", min_value=2, max_value=8, value=4, key="cmd_legs")
+            if sc2.button("🎟️ Send Top Games to SportyBet Slip", use_container_width=True):
+                st.session_state.daily_list = st.session_state.cmd_games[:int(legs_n)]
+                pr.save_state("daily_list", st.session_state.daily_list)
+                st.success(f"Sent top {int(legs_n)} games to 🎟️ SportyBet Slip tab!")
+            with st.expander(f"📋 All Scanned Games ({len(st.session_state.cmd_games)})"):
+                st.markdown(sh.render_analysis_cards(st.session_state.cmd_games[:30]), unsafe_allow_html=True)
 
-    p1 = min(float(np.sum(np.tril(mat, -1))), 0.78)
-    px = float(np.sum(np.diag(mat)))
-    p2 = min(float(np.sum(np.triu(mat, 1))), 0.78)
-    tot = p1 + px + p2
-    p1 = p1 / tot
-    px = px / tot
-    p2 = p2 / tot
-    p1x = p1 + px
-    px2 = p2 + px
-    p12 = p1 + p2
+with tab_daily:
+    st.subheader("🎟️ Smart SportyBet Ticket Builder")
+    with st.expander("⚡ Auto-Pick Games Directly Here", expanded=(not st.session_state.daily_list)):
+        ap1, ap2, ap3 = st.columns([1.1, 1.5, 0.9])
+        ap_dt = ap1.date_input("Date", value=datetime.now().date(), key="ap_dt")
+        ap_src = ap2.selectbox("Source", ["🌍 Top Leagues (ESPN Free)", "🔎 All 1,000+ Leagues (GOAL API)"], key="ap_src")
+        ap_n = ap3.number_input("Games", min_value=2, max_value=8, value=4, key="ap_n")
+        if st.button("⚡ Auto-Pick Best Games for SportyBet", use_container_width=True, key="ap_go"):
+            with st.spinner("Scanning & picking best games..."):
+                if ap_src.startswith("🌍"):
+                    gms, gerr = pr.scan_selected_leagues(list(pr.SCAN_LEAGUES.keys())[:8], odds_dict), ""
+                elif not gkey:
+                    gms, gerr = [], "Add your GOAL API Key in Sidebar/Secrets first (or use ESPN Free)."
+                else:
+                    gms, gerr = pr.scan_goal_date_games(ap_dt.strftime("%Y-%m-%d"), gkey, odds_dict, None, True, 15)
+                if gerr: st.error(gerr)
+                elif not gms: st.warning("No upcoming games left for this date. Try selecting Tomorrow's date!")
+                else:
+                    st.session_state.daily_list = gms[:int(ap_n)]
+                    pr.save_state("daily_list", st.session_state.daily_list); st.rerun()
 
-    po15 = float(sum(mat[i, j] for i in range(7) for j in range(7) if i+j > 1))
-    po25 = float(sum(mat[i, j] for i in range(7) for j in range(7) if i+j > 2))
-    pu25 = 1.0 - po25
-    pu35 = 1.0 - float(sum(mat[i, j] for i in range(7) for j in range(7) if i+j > 3))
-    pbtts = float(sum(mat[i, j] for i in range(1, 7) for j in range(1, 7)))
-    png = 1.0 - pbtts
-
-    ts = [str(np.unravel_index(k, mat.shape)[0]) + ":" + str(np.unravel_index(k, mat.shape)[1]) + " (" + "{:.0f}".format(mat.ravel()[k]*100) + "%)" for k in np.argsort(mat.ravel())[::-1][:3]]
-    probs = {"1": p1, "X": px, "2": p2}
-    bp = max(probs, key=probs.get)
-    bpr = probs[bp]
-    
-    if bp == "1" and bpr < 0.54 and p1x >= 0.70:
-        tip, cp, mkt = "1X", p1x, "Double Chance"
-    elif bp == "2" and bpr < 0.54 and px2 >= 0.70:
-        tip, cp, mkt = "X2", px2, "Double Chance"
+    if not st.session_state.daily_list:
+        st.info("Tap **⚡ Auto-Pick Best Games for SportyBet** above to build a ticket instantly.")
     else:
-        tip, cp, mkt = bp, bpr, "Match Result (1X2)"
+        sc1, sc2, sc3 = st.columns([2, 1, 1])
+        t_style = sc1.selectbox("Ticket Style", ["🔒 Safest Acca (Double Chance / Ov 1.5)", "🎯 Model Best Tip (1X2 / DC)", "🔥 Combo Boost (Higher Odds)", "⚽ Goals & GG Only"])
+        max_l = sc2.number_input("Max Legs", min_value=1, max_value=10, value=min(5, len(st.session_state.daily_list)))
+        t_stake = sc3.number_input("Stake (₦)", min_value=50.0, value=float(prefs.get("stake", 1000.0)), step=100.0, key="sp_stake")
 
-    conf = int(np.clip(round((cp - 0.28) / 0.52 * 9 + 1), 1, 10))
-    safes = {"1X": p1x, "X2": px2, "12": p12, "Over 1.5": po15, "Under 3.5": pu35}
-    sn = max(safes, key=safes.get)
-    sp_v = safes[sn]
+        legs, tot_o, est_win, slip_txt = sh.build_sporty_ticket(st.session_state.daily_list, t_style, int(max_l), float(t_stake))
+        k1, k2, k3 = st.columns(3)
+        k1.metric("Ticket Legs", len(legs)); k2.metric("Est. Total Odds", tot_o); k3.metric("Est. Win (₦)", f"₦{est_win:,.0f}")
+        st.markdown(sh.render_sporty_cards(legs), unsafe_allow_html=True)
+        st.markdown("**📋 1-Tap Copy Slip:**")
+        st.code(slip_txt, language=None)
+        st.markdown("**✅ Tap Off As You Add Each Match on SportyBet:**")
+        for i, l in enumerate(legs, 1):
+            st.checkbox(f"{i}. {l['Match']} → **{l['SportyBet Menu']}**", key=f"chk_{i}_{l['Match']}")
+        b1, b2 = st.columns(2)
+        b1.link_button("📲 Open SportyBet NG", "https://www.sportybet.com/ng/", use_container_width=True)
+        if b2.button("🗑️ Clear Slip", use_container_width=True):
+            st.session_state.daily_list = []; pr.save_state("daily_list", []); st.rerun()
 
-    if p1 >= 0.54 and po15 >= 0.68:
-        combo = "1 & Over 1.5"
-    elif p2 >= 0.54 and po15 >= 0.68:
-        combo = "2 & Over 1.5"
-    elif p1x >= 0.72 and pu35 >= 0.65:
-        combo = "1X & Under 3.5"
-    elif px2 >= 0.72 and pu35 >= 0.65:
-        combo = "X2 & Under 3.5"
-    elif po25 >= 0.54 and pbtts >= 0.54:
-        combo = "Over 2.5 & BTTS"
+with tab_track:
+    st.subheader("📒 My Bet History & ROI")
+    bdf = pr.load_bets()
+    if bdf.empty: st.info("No saved picks yet.")
     else:
-        combo = tip + " & " + ("Over 1.5" if po15 >= 0.65 else "Under 3.5")
-
-    evs = {"1": p1*o1 - 1, "X": px*ox - 1, "2": p2*o2 - 1}
-    bevs = max(evs, key=evs.get)
-    bev = evs[bevs]
-    tags = []
-    if conf >= 8 and {"1": o1, "X": ox, "2": o2}.get(bp, 1.45) <= 1.65:
-        tags.append("Strong Edge")
-    if bev >= 0.05:
-        tags.append("+" + "{:.0f}".format(bev*100) + "% EV (" + bevs + ")")
-    if px >= 0.28 and abs(h5["power"] - a5["power"]) <= 14:
-        tags.append("Draw Risk")
-    verdict = home + " [" + h_pos + "] vs " + away + " [" + a_pos + "] | xG: " + "{:.2f}".format(eh) + "-" + "{:.2f}".format(ea) + " | Safest: " + sn + " (" + "{:.0f}".format(sp_v*100) + "%) | Combo: " + combo
-    
-    return {
-        "Match": home + " vs " + away, "Market": mkt, "Tip": tip, "Prob": round(cp*100),
-        "Conf": conf, "Safest": sn + " (" + "{:.0f}".format(sp_v*100) + "%)", "Combo": combo,
-        "1": o1, "X": ox, "2": o2,
-        "O/U 2.5": ("Over" if po25 >= 0.52 else "Under") + " (" + "{:.0f}".format(po25*100) + "%)",
-        "BTTS": "{:.0f}".format(pbtts*100) + "%", "Score": ts[0].split(" ")[0],
-        "Category": " - ".join(tags) if tags else "Standard",
-        "_raw": {
-            "home": home, "away": away, "eh": eh, "ea": ea,
-            "h_pos": h_pos, "a_pos": a_pos,
-            "p1": p1, "px": px, "p2": p2, "p1x": p1x, "px2": px2, "p12": p12,
-            "po15": po15, "po25": po25, "pu25": pu25, "pu35": pu35,
-            "pbtts": pbtts, "png": png, "top_scores": ts, "verdict": verdict,
-            "ev": evs, "h5": h5, "a5": a5, "sprob": sp_v, "bev": bev, "bevs": bevs, "cp": cp,
-        },
-    }
-
-def scan_selected_leagues(league_names, odds_dict):
-    results = []
-    for lname in league_names:
-        slug = SCAN_LEAGUES.get(lname)
-        if not slug: continue
-        df, up, _ = load_espn(slug)
-        for dt, fh, fa, eo1, eox, eo2, _ in up:
-            fo = find_odds(fh, fa, odds_dict)
-            has_o = bool(fo or eo1)
-            o1, ox, o2 = (fo[0], fo[1], fo[2]) if fo else (eo1 or 1.85, eox or 3.50, eo2 or 4.20)
-            a = analyze_fixture(df, fh, fa, o1, ox, o2)
-            r = a["_raw"]
-            results.append({
-                "League": lname, "Date": dt, "Match": a["Match"],
-                "Odds": str(o1) + "/" + str(ox) + "/" + str(o2) if has_o else "-",
-                "Market": a["Market"], "Tip": a["Tip"], "Prob": a["Prob"], "Conf": a["Conf"],
-                "Safest": a["Safest"], "SafeProb": r["sprob"], "Combo": a["Combo"],
-                "O/U 2.5": a["O/U 2.5"], "BTTS": a["BTTS"], "Score": a["Score"],
-                "MaxEV": r["bev"] if has_o else 0.0, "BestEVSide": r["bevs"] if has_o else "-",
-                "Data": "Stats", "LogoH": "", "LogoA": "", "Verdict": r["verdict"],
-            })
-    return sorted(results, key=lambda x: (x["Conf"], x["SafeProb"]), reverse=True)
-
-def scan_goal_date_games(date_iso, gkey, odds_dict, selected_leagues=None, deep_history=True, max_leagues=20):
-    games, err = load_goal_by_date(date_iso, gkey)
-    if err: return [], err
-    upcoming = [g for g in games if not g.get("IsFinished")]
-    if selected_leagues:
-        upcoming = [g for g in upcoming if g["League"] in selected_leagues]
-    league_dfs = {}
-    if deep_history:
-        lids, seen = [], set()
-        for g in upcoming:
-            lid = g.get("LeagueId")
-            if lid and lid not in seen and find_odds(g["Home"], g["Away"], odds_dict):
-                seen.add(lid)
-                lids.append(lid)
-        for g in upcoming:
-            lid = g.get("LeagueId")
-            if lid and lid not in seen:
-                seen.add(lid)
-                lids.append(lid)
-        for lid in lids[:max_leagues]:
-            league_dfs[lid] = load_goal_results_fast(lid, gkey)
-    results = []
-    for g in upcoming:
-        df_h = league_dfs.get(g.get("LeagueId"), pd.DataFrame())
-        fo = find_odds(g["Home"], g["Away"], odds_dict)
-        has_o = bool(fo)
-        o1, ox, o2 = (fo[0], fo[1], fo[2]) if fo else (1.85, 3.50, 4.20)
-        a = analyze_fixture(df_h, g["Home"], g["Away"], o1, ox, o2)
-        r = a["_raw"]
-        has_hist = (r["h5"]["form"] != "-" or r["a5"]["form"] != "-")
-        results.append({
-            "League": g["League"], "Date": g["DateTime"], "Match": a["Match"],
-            "Odds": str(o1) + "/" + str(ox) + "/" + str(o2) if has_o else "-",
-            "Market": a["Market"], "Tip": a["Tip"], "Prob": a["Prob"], "Conf": a["Conf"],
-            "Safest": a["Safest"], "SafeProb": r["sprob"], "Combo": a["Combo"],
-            "O/U 2.5": a["O/U 2.5"], "BTTS": a["BTTS"], "Score": a["Score"],
-            "MaxEV": r["bev"] if has_o else 0.0, "BestEVSide": r["bevs"] if has_o else "-",
-            "Data": "Stats" if has_hist else ("Odds" if has_o else "NoData"),
-            "LogoH": g.get("LogoH", ""), "LogoA": g.get("LogoA", ""), "Verdict": r["verdict"],
-        })
-    return sorted(results, key=lambda x: (1 if x["Data"]=="Stats" else (0.5 if x["Data"]=="Odds" else 0), x["Conf"], x["SafeProb"]), reverse=True), ""
-
-def build_ctx(res, h2h, comp):
-    r = res["_raw"]
-    h5, a5 = r["h5"], r["a5"]
-    h2h_txt = "None" if h2h.empty else h2h.to_string(index=False)
-    lines = [
-        "Comp: " + str(comp) + " | Match: " + str(res["Match"]) + " | Odds: " + str(res["1"]) + "/" + str(res["X"]) + "/" + str(res["2"]),
-        "Standings: " + str(r["home"]) + " [" + str(r["h_pos"]) + "] vs " + str(r["away"]) + " [" + str(r["a_pos"]) + "]",
-        "xG: " + str(r["home"]) + " " + "{:.2f}".format(r["eh"]) + " - " + "{:.2f}".format(r["ea"]) + " " + str(r["away"]),
-        "1X2: 1=" + "{:.1f}".format(r["p1"]*100) + "% X=" + "{:.1f}".format(r["px"]*100) + "% 2=" + "{:.1f}".format(r["p2"]*100) + "%",
-        "DC: 1X=" + "{:.1f}".format(r["p1x"]*100) + "% X2=" + "{:.1f}".format(r["px2"]*100) + "%",
-        "Goals: O1.5=" + "{:.1f}".format(r["po15"]*100) + "% O2.5=" + "{:.1f}".format(r["po25"]*100) + "% BTTS=" + "{:.1f}".format(r["pbtts"]*100) + "%",
-        "Safest: " + str(res["Safest"]) + " | Combo: " + str(res["Combo"]) + " | Scores: " + ", ".join(r["top_scores"]),
-        "Home L5: " + str(h5["form"]) + " Pwr=" + str(h5["power"]) + " | Away L5: " + str(a5["form"]) + " Pwr=" + str(a5["power"]),
-        "H2H: " + h2h_txt,
-    ]
-    return "\n".join(lines)
-
-def smart_advisor(res, q):
-    r = res["_raw"]
-    mkts = sorted([
-        (r["home"] + " (1)", r["p1"]), ("Draw (X)", r["px"]), (r["away"] + " (2)", r["p2"]),
-        ("1X", r["p1x"]), ("X2", r["px2"]), ("Over 1.5", r["po15"]), ("Over 2.5", r["po25"]),
-        ("Under 2.5", r["pu25"]), ("Under 3.5", r["pu35"]), ("BTTS Yes", r["pbtts"]), ("BTTS No", r["png"]),
-    ], key=lambda x: x[1], reverse=True)
-    lines = [
-        "**Analytical Breakdown - " + str(res["Match"]) + "**",
-        "Standings: " + str(r["home"]) + " [" + str(r["h_pos"]) + "] vs " + str(r["away"]) + " [" + str(r["a_pos"]) + "]",
-        "",
-        "**Top Recommendation:** " + str(mkts[0][0]) + " (" + "{:.1f}".format(mkts[0][1]*100) + "%) | **Combo:** " + str(res["Combo"]),
-        "",
-        "1. **" + str(mkts[0][0]) + "** - " + "{:.1f}".format(mkts[0][1]*100) + "%",
-        "2. **" + str(mkts[1][0]) + "** - " + "{:.1f}".format(mkts[1][1]*100) + "%",
-        "3. **" + str(mkts[2][0]) + "** - " + "{:.1f}".format(mkts[2][1]*100) + "%",
-        "",
-        "**Value Edge:** " + str(r["bevs"]) + " (" + "{:+.1f}".format(r["bev"]*100) + "% EV) | **Top Scores:** " + ", ".join(r["top_scores"]),
-    ]
-    return "\n".join(lines)
-
-def ask_llm(prov, key, sys_p, hist, q):
-    k = key.strip()
-    if prov == "Groq (Free AI)":
-        msgs = [{"role":"system","content":sys_p}] + [{"role":m["role"],"content":m["content"]} for m in hist[-6:]] + [{"role":"user","content":q}]
-        err = ""
-        for m in ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"]:
-            try:
-                r = requests.post(
-                    "https://api.groq.com/openai/v1/chat/completions",
-                    headers={"Authorization": "Bearer " + k, "Content-Type": "application/json"},
-                    json={"model": m, "messages": msgs, "temperature": 0.3}, timeout=25,
-                )
-                if r.status_code == 200:
-                    return r.json()["choices"][0]["message"]["content"]
-                err = "Groq Error " + str(r.status_code) + ": " + str(r.text[:150])
-            except Exception as e:
-                err = str(e)
-        return err
-    contents = [{"role":"user" if m["role"]=="user" else "model","parts":[{"text":m["con
+        st_df = bdf[bdf["status"].isin(["Won","Lost"])]
+        stk = st_df["stake"].sum() if not st_df.empty else 0.0
+        prf = st_df["profit"].sum() if not st_df.empty else 0.0
+        wr = (len(st_df[st_df["status"]=="Won"])/len(st_df)*100) if not st_df.empty else 0.0
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Picks", len(bdf)); k2.metric("Win Rate", f"{wr:.1f}%"); k3.metric("Profit/Loss", f"{prf:+,.2f}"); k4.metric("ROI", f"{(prf/stk*100 if stk>0 else 0.0):+.1f}%")
+        st.divider()
+        for _, row in bdf.iterrows():
+            cols = st.columns([3,1.5,1,1,1.1,1.1])
+            cols[0].write(f"**{row['match_name']}** ({row['date']})")
+            cols[1].write(f"`{row['tip']}` ({row['confidence']}/10) @ **{row['odds']}**")
+            cols[2].write(f"{row['stake']:.0f}"); cols[3].write(f"**{row['status']}** ({row['profit']:+.0f})")
+            if row["status"] == "Pending":
+                if cols[4].button("✅ Won", key=f"w_{row['id']}"): pr.update_bet(row["id"], "Won"); st.rerun()
+                if cols[5].button("❌ Lost", key=f"l_{row['id']}"): pr.update_bet(row["id"], "Lost"); st.rerun()
