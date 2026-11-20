@@ -112,8 +112,10 @@ with tab_date:
             rd = pr.analyze_fixture(df_mh, g["Home"], g["Away"], o1a, oxa, o2a); rwd = rd["_raw"]
             cur_res, cur_h2h, cur_comp = rd, pr.get_h2h(df_mh, g["Home"], g["Away"]), g["League"]
 
-            if rwd["h_pos"] != "Pos: N/A":
-                st.markdown(f'<div class="glass-card"><b>🏆 Standings:</b> {g["Home"]} <span class="p-green">{rwd["h_pos"]}</span> vs {g["Away"]} <span class="p-blue">{rwd["a_pos"]}</span></div>', unsafe_allow_html=True)
+            h_p = rwd.get("h_pos", "Pos: N/A")
+            a_p = rwd.get("a_pos", "Pos: N/A")
+            if h_p != "Pos: N/A" and a_p != "Pos: N/A":
+                st.markdown(f'<div class="glass-card"><b>🏆 Standings:</b> {g["Home"]} <span class="p-green">{h_p}</span> vs {g["Away"]} <span class="p-blue">{a_p}</span></div>', unsafe_allow_html=True)
 
             m1,m2,m3,m4,m5 = st.columns(5)
             m1.metric("Tip", f"{rd['Tip']} ({rd['Conf']}/10)"); m2.metric("Safest", rd["Safest"]); m3.metric("Combo", rd["Combo"]); m4.metric("O/U & BTTS", f"{rd['O/U 2.5']} | {rd['BTTS']}"); m5.metric("Odds", f"{o1a}/{oxa}/{o2a}")
@@ -160,9 +162,11 @@ with tab_board:
             res = pr.analyze_fixture(df_league, home_t, away_t, o1, ox, o2); raw = res["_raw"]
             if cur_res is None: cur_res, cur_h2h, cur_comp = res, pr.get_h2h(df_league, home_t, away_t), selected_comp
 
-            # Display Live League Standings Banner
-            if raw["h_pos"] != "Pos: N/A":
-                st.markdown(f'<div class="glass-card"><b>🏆 League Position:</b> {home_t} <span class="p-green"><b>{raw["h_pos"]}</b></span> &nbsp;vs&nbsp; {away_t} <span class="p-blue"><b>{raw["a_pos"]}</b></span></div>', unsafe_allow_html=True)
+            # Display Live League Standings Safely
+            hp = raw.get("h_pos", "Pos: N/A")
+            ap = raw.get("a_pos", "Pos: N/A")
+            if hp != "Pos: N/A" and ap != "Pos: N/A":
+                st.markdown(f'<div class="glass-card"><b>🏆 League Position:</b> {home_t} <span class="p-green"><b>{hp}</b></span> &nbsp;vs&nbsp; {away_t} <span class="p-blue"><b>{ap}</b></span></div>', unsafe_allow_html=True)
 
             m1,m2,m3,m4,m5 = st.columns(5)
             m1.metric("Tip", f"{res['Tip']} ({res['Conf']}/10)"); m2.metric("Safest", res["Safest"]); m3.metric("Combo", res["Combo"]); m4.metric("O/U & BTTS", f"{res['O/U 2.5']} | {res['BTTS']}"); m5.metric("Score", res["Score"])
@@ -175,8 +179,10 @@ with tab_board:
             if b2.button("💾 Save to Tracker", use_container_width=True):
                 pr.save_bet(selected_comp, res["Match"], res["Tip"], res["Conf"], podds, stake); st.success("Saved!")
             ch, ca = st.columns(2); h5, a5 = raw["h5"], raw["a5"]
-            ch.info(f"🏠 **{home_t} [{raw['h_pos']}]:** Form `{h5['form']}` | Power `{h5['power']}` | GF `{h5['gf']}` GA `{h5['ga']}`")
-            ca.info(f"✈️ **{away_t} [{raw['a_pos']}]:** Form `{a5['form']}` | Power `{a5['power']}` | GF `{a5['gf']}` GA `{a5['ga']}`")
+            hb = f" [{hp}]" if hp != "Pos: N/A" else ""
+            ab = f" [{ap}]" if ap != "Pos: N/A" else ""
+            ch.info(f"🏠 **{home_t}{hb}:** Form `{h5['form']}` | Power `{h5['power']}` | GF `{h5['gf']}` GA `{h5['ga']}`")
+            ca.info(f"✈️ **{away_t}{ab}:** Form `{a5['form']}` | Power `{a5['power']}` | GF `{a5['gf']}` GA `{a5['ga']}`")
         if upcoming_fixtures:
             st.divider(); st.subheader("📋 Upcoming Analyzed Games")
             rows = []
