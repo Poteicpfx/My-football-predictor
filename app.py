@@ -78,7 +78,7 @@ sec_ai = pr.get_secret("GROQ_API_KEY") if ai_prov == "Groq (Free AI)" else (pr.g
 ai_key = st.sidebar.text_input("Free AI Key", value=sec_ai, type="password") if ai_prov != ai_provs[0] else ""
 odds_events, odds_dict, odds_err = pr.load_the_odds_api(okey)
 
-st.markdown('<div class="hero-banner"><h2 style="margin:0;color:#ecfdf5;">⚽ World Football Predictor Pro</h2><div style="color:#a7f3d0;font-size:0.88rem;">Fixed Read-Only Cards • Auto Odds • AI Commander • SportyBet Slip</div></div>', unsafe_allow_html=True)
+st.markdown('<div class="hero-banner"><h2 style="margin:0;color:#ecfdf5;">⚽ World Football Predictor Pro</h2><div style="color:#a7f3d0;font-size:0.88rem;">Live Standings • Dixon-Coles Probability • AI Commander • SportyBet Slip</div></div>', unsafe_allow_html=True)
 tab_date, tab_board, tab_ai, tab_daily, tab_track = st.tabs(["📅 By Date", "🔍 League", "🤖 AI Commander", "🎟️ SportyBet Slip", "📒 Tracker"])
 cur_res, cur_h2h, cur_comp = None, pd.DataFrame(), selected_comp
 
@@ -111,6 +111,10 @@ with tab_date:
             o1a, oxa, o2a = float(g["1"] or 1.90), float(g["X"] or 3.40), float(g["2"] or 3.90)
             rd = pr.analyze_fixture(df_mh, g["Home"], g["Away"], o1a, oxa, o2a); rwd = rd["_raw"]
             cur_res, cur_h2h, cur_comp = rd, pr.get_h2h(df_mh, g["Home"], g["Away"]), g["League"]
+
+            if rwd["h_pos"] != "Pos: N/A":
+                st.markdown(f'<div class="glass-card"><b>🏆 Standings:</b> {g["Home"]} <span class="p-green">{rwd["h_pos"]}</span> vs {g["Away"]} <span class="p-blue">{rwd["a_pos"]}</span></div>', unsafe_allow_html=True)
+
             m1,m2,m3,m4,m5 = st.columns(5)
             m1.metric("Tip", f"{rd['Tip']} ({rd['Conf']}/10)"); m2.metric("Safest", rd["Safest"]); m3.metric("Combo", rd["Combo"]); m4.metric("O/U & BTTS", f"{rd['O/U 2.5']} | {rd['BTTS']}"); m5.metric("Odds", f"{o1a}/{oxa}/{o2a}")
             st.markdown(f'<div class="glass-card"><b>🧠 Verdict:</b> {rwd["verdict"]} | <b>Scores:</b> {", ".join(rwd["top_scores"])}</div>', unsafe_allow_html=True)
@@ -155,19 +159,24 @@ with tab_board:
         if home_t != away_t:
             res = pr.analyze_fixture(df_league, home_t, away_t, o1, ox, o2); raw = res["_raw"]
             if cur_res is None: cur_res, cur_h2h, cur_comp = res, pr.get_h2h(df_league, home_t, away_t), selected_comp
+
+            # Display Live League Standings Banner
+            if raw["h_pos"] != "Pos: N/A":
+                st.markdown(f'<div class="glass-card"><b>🏆 League Position:</b> {home_t} <span class="p-green"><b>{raw["h_pos"]}</b></span> &nbsp;vs&nbsp; {away_t} <span class="p-blue"><b>{raw["a_pos"]}</b></span></div>', unsafe_allow_html=True)
+
             m1,m2,m3,m4,m5 = st.columns(5)
             m1.metric("Tip", f"{res['Tip']} ({res['Conf']}/10)"); m2.metric("Safest", res["Safest"]); m3.metric("Combo", res["Combo"]); m4.metric("O/U & BTTS", f"{res['O/U 2.5']} | {res['BTTS']}"); m5.metric("Score", res["Score"])
-            st.markdown(f'<div class="glass-card"><b>🧠 Verdict ({res["Category"]}):</b> {raw["verdict"]} | <b>Scores:</b> {", ".join(raw["top_scores"])}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="glass-card"><b>🧠 Verdict ({res["Category"]}):</b> {raw["verdict"]}<br><b>Top 3 Scores:</b> {", ".join(raw["top_scores"])}</div>', unsafe_allow_html=True)
             b1, b2 = st.columns(2)
             if b1.button("🎟️ Add to SportyBet Slip", use_container_width=True):
                 rc = {k:v for k,v in res.items() if k!="_raw"}; rc["Competition"] = selected_comp
-                st.session_state.daily_list.append(rc); pr.save_state("daily_list", st.session_state.daily_list); st.success("Added!")
+                st.session_state.daily_list.append(rc); pr.save_state("daily_list", st.session_state.daily_list); st.success("Added to SportyBet Slip tab!")
             podds = {"1":o1,"X":ox,"2":o2,"1X":round(1/(1/o1+1/ox),2),"X2":round(1/(1/o2+1/ox),2)}.get(res["Tip"], o1)
             if b2.button("💾 Save to Tracker", use_container_width=True):
                 pr.save_bet(selected_comp, res["Match"], res["Tip"], res["Conf"], podds, stake); st.success("Saved!")
             ch, ca = st.columns(2); h5, a5 = raw["h5"], raw["a5"]
-            ch.info(f"🏠 **{home_t}:** `{h5['form']}` | Pwr `{h5['power']}` | GF `{h5['gf']}` GA `{h5['ga']}`")
-            ca.info(f"✈️ **{away_t}:** `{a5['form']}` | Pwr `{a5['power']}` | GF `{a5['gf']}` GA `{a5['ga']}`")
+            ch.info(f"🏠 **{home_t} [{raw['h_pos']}]:** Form `{h5['form']}` | Power `{h5['power']}` | GF `{h5['gf']}` GA `{h5['ga']}`")
+            ca.info(f"✈️ **{away_t} [{raw['a_pos']}]:** Form `{a5['form']}` | Power `{a5['power']}` | GF `{a5['gf']}` GA `{a5['ga']}`")
         if upcoming_fixtures:
             st.divider(); st.subheader("📋 Upcoming Analyzed Games")
             rows = []
@@ -226,7 +235,7 @@ with tab_ai:
     else:
         if cur_res is None: st.info("Select a match in **By Date** or **League** first.")
         else:
-            st.success(f"**Active:** {cur_res['Match']} | Tip: `{cur_res['Tip']}` | Odds: `{cur_res['1']}/{cur_res['X']}/{cur_res['2']}`")
+            st.success(f"**Active:** {cur_res['Match']} ({cur_comp}) | Tip: `{cur_res['Tip']}` | Odds: `{cur_res['1']}/{cur_res['X']}/{cur_res['2']}`")
             ctx = pr.build_ctx(cur_res, cur_h2h, cur_comp)
             qc = st.columns(4); qq = None
             if qc[0].button("🎯 Best Pick", use_container_width=True): qq = "Select the single best option and explain why."
