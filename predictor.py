@@ -6,8 +6,28 @@ from data_sources import *
 def compute_standings(df):
     if df.empty or "HomeTeam" not in df.columns or "FTHG" not in df.columns:
         return {}
+
+    # Isolate current active season only (prevents combining points from past seasons)
+    df_curr = df
+    if "Season" in df.columns:
+        df_curr = df[df["Season"] == df["Season"].max()]
+    elif "DateParsed" in df.columns and df["DateParsed"].notna().any():
+        max_dt = df["DateParsed"].dropna().max()
+        if max_dt.month >= 7:
+            cutoff = pd.Timestamp(year=max_dt.year, month=7, day=1)
+        else:
+            cutoff = pd.Timestamp(year=max_dt.year - 1, month=7, day=1)
+        sub = df[df["DateParsed"] >= cutoff]
+        if len(sub) >= 15:
+            df_curr = sub
+        else:
+            cutoff_cal = pd.Timestamp(year=max_dt.year, month=1, day=1)
+            sub_cal = df[df["DateParsed"] >= cutoff_cal]
+            if len(sub_cal) >= 10:
+                df_curr = sub_cal
+
     tbl = {}
-    for _, r in df.iterrows():
+    for _, r in df_curr.iterrows():
         h, a = r["HomeTeam"], r["AwayTeam"]
         hg, ag = r["FTHG"], r["FTAG"]
         for tm in (h, a):
@@ -28,6 +48,7 @@ def compute_standings(df):
             tbl[a]["pts"] += 1
         else:
             tbl[a]["pts"] += 3
+
     sorted_teams = sorted(
         tbl.keys(),
         key=lambda t: (tbl[t]["pts"], tbl[t]["gd"], tbl[t]["gf"]),
@@ -36,7 +57,7 @@ def compute_standings(df):
     res = {}
     for rank, t in enumerate(sorted_teams, 1):
         s = tbl[t]
-        badge_txt = "#" + str(rank) + " (" + str(s["pts"]) + " pts, GD " + "{:+d}".format(s["gd"]) + ")"
+        badge_txt = "#" + str(rank) + " (" + str(s["pts"]) + " pts | " + str(s["mp"]) + " MP | GD " + "{:+d}".format(s["gd"]) + ")"
         res[t] = {
             "pos": rank,
             "pts": s["pts"],
