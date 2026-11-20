@@ -204,6 +204,8 @@ with tab_ai:
                     if gerr: st.error(gerr)
                     st.session_state.cmd_games = games
                     st.session_state.cmd_result = pr.command_ai_multi(ai_prov, ai_key, games, cmd_txt)
+                    if games and not st.session_state.daily_list:
+                        st.session_state.daily_list = games[:4]; pr.save_state("daily_list", st.session_state.daily_list)
     elif ai_mode.startswith("🌍"):
         picked_lgs = st.multiselect("Choose Leagues", list(pr.SCAN_LEAGUES.keys()), default=["🇬🇧 Premier League", "🇪🇸 La Liga", "🏆 UEFA Champions League", "🟠 UEFA Europa League"])
         cc = st.columns(3); qcmd = None
@@ -219,6 +221,8 @@ with tab_ai:
                 games = pr.scan_selected_leagues(picked_lgs, odds_dict)
                 st.session_state.cmd_games = games
                 st.session_state.cmd_result = pr.command_ai_multi(ai_prov, ai_key, games, cmd_text)
+                if games and not st.session_state.daily_list:
+                    st.session_state.daily_list = games[:4]; pr.save_state("daily_list", st.session_state.daily_list)
     else:
         if cur_res is None: st.info("Select a match in **By Date** or **League** first.")
         else:
@@ -257,8 +261,27 @@ with tab_ai:
 
 with tab_daily:
     st.subheader("🎟️ Smart SportyBet Ticket Builder")
+    with st.expander("⚡ Auto-Pick Games Directly Here", expanded=(not st.session_state.daily_list)):
+        ap1, ap2, ap3 = st.columns([1.1, 1.5, 0.9])
+        ap_dt = ap1.date_input("Date", value=datetime.now().date(), key="ap_dt")
+        ap_src = ap2.selectbox("Source", ["🌍 Top Leagues (ESPN Free)", "🔎 All 1,000+ Leagues (GOAL API)"], key="ap_src")
+        ap_n = ap3.number_input("Games", min_value=2, max_value=8, value=4, key="ap_n")
+        if st.button("⚡ Auto-Pick Best Games for SportyBet", use_container_width=True, key="ap_go"):
+            with st.spinner("Scanning & picking best games..."):
+                if ap_src.startswith("🌍"):
+                    gms, gerr = pr.scan_selected_leagues(list(pr.SCAN_LEAGUES.keys())[:8], odds_dict), ""
+                elif not gkey:
+                    gms, gerr = [], "Add your GOAL API Key in Sidebar/Secrets first (or use ESPN Free)."
+                else:
+                    gms, gerr = pr.scan_goal_date_games(ap_dt.strftime("%Y-%m-%d"), gkey, odds_dict, None, True, 15)
+                if gerr: st.error(gerr)
+                elif not gms: st.warning("No upcoming games left for this date. Try selecting Tomorrow's date!")
+                else:
+                    st.session_state.daily_list = gms[:int(ap_n)]
+                    pr.save_state("daily_list", st.session_state.daily_list); st.rerun()
+
     if not st.session_state.daily_list:
-        st.info("Tap **🎟️ Send Top Games to SportyBet Slip** inside AI Commander, or add individual matches.")
+        st.info("Tap **⚡ Auto-Pick Best Games for SportyBet** above to build a ticket instantly.")
     else:
         sc1, sc2, sc3 = st.columns([2, 1, 1])
         t_style = sc1.selectbox("Ticket Style", ["🔒 Safest Acca (Double Chance / Ov 1.5)", "🎯 Model Best Tip (1X2 / DC)", "🔥 Combo Boost (Higher Odds)", "⚽ Goals & GG Only"])
