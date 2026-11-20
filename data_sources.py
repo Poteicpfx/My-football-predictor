@@ -1,5 +1,17 @@
 from db_and_odds import *
 
+def to_wat(iso_str):
+    try:
+        s = str(iso_str or "").strip()
+        if not s: return "", ""
+        if len(s) == 10: return s, "TBD"
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        if dt.tzinfo is None: dt = dt.replace(tzinfo=timezone.utc)
+        wat = dt.astimezone(timezone(timedelta(hours=1)))
+        return wat.strftime("%Y-%m-%d"), wat.strftime("%H:%M WAT")
+    except Exception:
+        return str(iso_str)[:10], str(iso_str)[11:16]
+
 def _parse_espn(events, fb="Soccer"):
     out = []
     for ev in events:
@@ -7,14 +19,23 @@ def _parse_espn(events, fb="Soccer"):
         hc = next((c for c in cs if c.get("homeAway") == "home"), None)
         ac = next((c for c in cs if c.get("homeAway") == "away"), None)
         if not hc or not ac: continue
-        hn, an = (hc.get("team") or {}).get("displayName"), (ac.get("team") or {}).get("displayName")
+        ht, at = hc.get("team") or {}, ac.get("team") or {}
+        hn, an = ht.get("displayName"), at.get("displayName")
         if not hn or not an: continue
         sti = (comp.get("status") or {}).get("type") or {}
         o1, ox, o2, bk = extract_comp_odds(comp)
         lgl = ev.get("leagues") or []
         lgn = lgl[0].get("name") if lgl and isinstance(lgl[0], dict) else None
         lg = (ev.get("season") or {}).get("slug") or lgn or fb
-        out.append({"DateTime": (ev.get("date") or "")[:16].replace("T", " "), "League": lg, "Home": hn, "Away": an, "Status": sti.get("shortDetail", "Scheduled"), "1": o1, "X": ox, "2": o2, "Bookie": bk, "LeagueId": None, "IsFinished": sti.get("state") == "post"})
+        d_wat, t_wat = to_wat(ev.get("date"))
+        out.append({
+            "DateTime": f"{d_wat} {t_wat}".strip(), "DateWAT": d_wat, "TimeWAT": t_wat,
+            "League": lg, "Home": hn, "Away": an,
+            "LogoH": ht.get("logo", ""), "LogoA": at.get("logo", ""),
+            "Status": sti.get("shortDetail", "Scheduled"),
+            "1": o1, "X": ox, "2": o2, "Bookie": bk,
+            "LeagueId": None, "IsFinished": sti.get("state") == "post",
+        })
     return out
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -29,14 +50,14 @@ def load_espn_by_date(date_str):
             else: last_err = f"HTTP {r.status_code}"
         except Exception as e: last_err = str(e)
     games, seen = [], set()
-    for name, slug in list(SCAN_LEAGUES.items()) + [("🌍 World Cup", "fifa.world"), ("🌍 AFCON", "caf.nations")]:
+    for name, slug in list(SCAN_LEAGUES.items()) + [("World Cup", "fifa.world"), ("AFCON", "caf.nations")]:
         try:
             r = requests.get(f"https://site.api.espn.com/apis/site/v2/sports/soccer/{slug}/scoreboard?dates={date_str}", timeout=8)
             if r.status_code == 200:
                 for g in _parse_espn(r.json().get("events", []), name):
                     if (g["Home"], g["Away"]) not in seen: seen.add((g["Home"], g["Away"])); games.append(g)
         except Exception: pass
-    return (games, "") if games else ([], f"No ESPN games found for {date_str} ({last_err or 'off-day'}).")
+    return (games, "") if games else ([], f"No ESPN fixtures found for {date_str} ({last_err or 'off-day'}).")
 
 @st.cache_data(ttl=1800)
 def load_espn(slug):
@@ -56,12 +77,13 @@ def load_espn(slug):
                 if not hc or not ac: continue
                 hn, an = (hc.get("team") or {}).get("displayName"), (ac.get("team") or {}).get("displayName")
                 if not hn or not an: continue
-                dt = (ev.get("date") or "")[:10]; st_s = ((comp.get("status") or {}).get("type") or {}).get("state", "")
+                d_wat, _ = to_wat(ev.get("date"))
+                st_s = ((comp.get("status") or {}).get("type") or {}).get("state", "")
                 if st_s == "post":
-                    try: fin.append({"Date": dt, "HomeTeam": hn, "AwayTeam": an, "FTHG": int(float(hc.get("score") or 0)), "FTAG": int(float(ac.get("score") or 0))})
+                    try: fin.append({"Date": d_wat, "HomeTeam": hn, "AwayTeam": an, "FTHG": int(float(hc.get("score") or 0)), "FTAG": int(float(ac.get("score") or 0))})
                     except (ValueError, TypeError): pass
                 elif st_s == "pre":
-                    o1, ox, o2, bk = extract_comp_odds(comp); up[(dt, hn, an)] = (dt, hn, an, o1, ox, o2, bk)
+                    o1, ox, o2, bk = extract_comp_odds(comp); up[(d_wat, hn, an)] = (d_wat, hn, an, o1, ox, o2, bk)
         except Exception: pass
     df = pd.DataFrame(fin)
     if not df.empty: df["DateParsed"] = pd.to_datetime(df["Date"], errors="coerce"); df = df.sort_values("DateParsed").reset_index(drop=True)
@@ -73,18 +95,29 @@ def load_goal_by_date(date_iso, key):
     for off in [0, 100, 200, 300]:
         try:
             r = requests.get(f"https://api.goal-api.com/v1/fixtures/date/{date_iso}", params={"limit": 100, "offset": off}, headers=hdr, timeout=15)
-            if r.status_code == 401: return [], "❌ Invalid GOAL API key."
+            if r.status_code == 401: return [], "Invalid GOAL API key."
             if r.status_code != 200: err = f"GOAL API {r.status_code}"; break
             p = r.json(); data = p.get("data") or []; items.extend(data)
             if not (p.get("pagination") or {}).get("hasMore", False) or len(data) < 100: break
         except Exception as e: err = str(e); break
     games = []
     for m in items:
-        h, a = (m.get("homeTeam") or {}).get("name") or m.get("homeTeamName"), (m.get("awayTeam") or {}).get("name") or m.get("awayTeamName")
+        ht, at = m.get("homeTeam") or {}, m.get("awayTeam") or {}
+        h, a = ht.get("name") or m.get("homeTeamName"), at.get("name") or m.get("awayTeamName")
         if not h or not a: continue
         per, stt = str(m.get("matchPeriod") or "").upper(), str(m.get("matchStatus") or "").upper()
         is_fin = per == "FINISHED" or stt in ("FINISHED", "FT", "AET", "PEN", "AFTER PEN.", "PLAYED")
-        games.append({"DateTime": (m.get("kickoffUtc") or date_iso)[:16].replace("T", " "), "League": (m.get("league") or {}).get("name") or m.get("leagueName") or "League", "Home": h, "Away": a, "Status": m.get("matchStatus") or "Scheduled", "1": None, "X": None, "2": None, "Bookie": "", "LeagueId": (m.get("league") or {}).get("id") or m.get("leagueId"), "IsFinished": is_fin})
+        d_wat, t_wat = to_wat(m.get("kickoffUtc") or date_iso)
+        games.append({
+            "DateTime": f"{d_wat} {t_wat}".strip(), "DateWAT": d_wat, "TimeWAT": t_wat,
+            "League": (m.get("league") or {}).get("name") or m.get("leagueName") or "League",
+            "Home": h, "Away": a,
+            "LogoH": ht.get("logo") or ht.get("crest") or m.get("homeTeamLogo") or "",
+            "LogoA": at.get("logo") or at.get("crest") or m.get("awayTeamLogo") or "",
+            "Status": m.get("matchStatus") or "Scheduled",
+            "1": None, "X": None, "2": None, "Bookie": "",
+            "LeagueId": (m.get("league") or {}).get("id") or m.get("leagueId"), "IsFinished": is_fin,
+        })
     return games, ("" if items or not err else err)
 
 @st.cache_data(ttl=3600)
@@ -139,7 +172,7 @@ def load_goal_fixtures(lid, key):
         for off in [0, 100]:
             try:
                 r = requests.get(url, params={**bp, "offset": off}, headers=hdr, timeout=15)
-                if r.status_code == 401: return pd.DataFrame(), [], "❌ Invalid GOAL API key."
+                if r.status_code == 401: return pd.DataFrame(), [], "Invalid GOAL API key."
                 if r.status_code != 200: lerr = f"API {r.status_code}"; break
                 ok = True; p = r.json(); d = p.get("data") or []; items.extend(d)
                 if not (p.get("pagination") or {}).get("hasMore", False) or len(d) < 100: break
@@ -148,7 +181,7 @@ def load_goal_fixtures(lid, key):
     for m in items:
         h, a = (m.get("homeTeam") or {}).get("name") or m.get("homeTeamName"), (m.get("awayTeam") or {}).get("name") or m.get("awayTeamName")
         if not h or not a: continue
-        dt = (m.get("kickoffUtc") or m.get("matchDate") or "")[:10]
+        d_wat, _ = to_wat(m.get("kickoffUtc") or m.get("matchDate"))
         hs = m.get("homeScore") if m.get("homeScore") is not None else m.get("homeTeamScore")
         as_ = m.get("awayScore") if m.get("awayScore") is not None else m.get("awayTeamScore")
         per, stt = str(m.get("matchPeriod") or "").upper(), str(m.get("matchStatus") or "").upper()
@@ -156,9 +189,9 @@ def load_goal_fixtures(lid, key):
         isu = per in ("NOT_STARTED","SCHEDULED") or stt in ("SCHEDULED","NOT_STARTED","NS","TIMED","UPCOMING","")
         if hs is not None and as_ is not None and (isf or (not isu and per != "NOT_STARTED")):
             try:
-                if (dt, h, a) not in sf: sf.add((dt, h, a)); fin.append({"Date":dt,"HomeTeam":h,"AwayTeam":a,"FTHG":int(float(hs)),"FTAG":int(float(as_))})
+                if (d_wat, h, a) not in sf: sf.add((d_wat, h, a)); fin.append({"Date":d_wat,"HomeTeam":h,"AwayTeam":a,"FTHG":int(float(hs)),"FTAG":int(float(as_))})
             except (ValueError, TypeError): pass
-        elif not isf and (dt, h, a) not in su: su.add((dt, h, a)); up.append((dt, h, a, None, None, None, ""))
+        elif not isf and (d_wat, h, a) not in su: su.add((d_wat, h, a)); up.append((d_wat, h, a, None, None, None, ""))
     df = pd.DataFrame(fin)
     if not df.empty: df["DateParsed"] = pd.to_datetime(df["Date"], errors="coerce"); df = df.sort_values("DateParsed").reset_index(drop=True)
     return df, sorted(up, key=lambda x: x[0])[:40], ("" if ok else lerr)
