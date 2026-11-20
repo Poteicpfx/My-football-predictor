@@ -53,9 +53,9 @@ def analyze_fixture(df, home, away, o1=1.85, ox=3.50, o2=4.20):
     pbtts = float(sum(mat[i,j] for i in range(1,7) for j in range(1,7))); png = 1.0-pbtts
     ts = [f"{np.unravel_index(k,mat.shape)[0]}:{np.unravel_index(k,mat.shape)[1]} ({mat.ravel()[k]*100:.0f}%)" for k in np.argsort(mat.ravel())[::-1][:3]]
     probs = {"1":p1,"X":px,"2":p2}; bp = max(probs, key=probs.get); bpr = probs[bp]
-    if bp == "1" and bpr < 0.52 and p1x >= 0.72: tip, cp = "1X", p1x
-    elif bp == "2" and bpr < 0.52 and px2 >= 0.72: tip, cp = "X2", px2
-    else: tip, cp = bp, bpr
+    if bp == "1" and bpr < 0.52 and p1x >= 0.72: tip, cp, mkt = "1X", p1x, "Double Chance"
+    elif bp == "2" and bpr < 0.52 and px2 >= 0.72: tip, cp, mkt = "X2", px2, "Double Chance"
+    else: tip, cp, mkt = bp, bpr, "Match Result (1X2)"
     conf = int(np.clip(round((cp-0.25)/0.60*9+1), 1, 10))
     safes = {"1X":p1x,"X2":px2,"12":p12,"Over 1.5":po15,"Under 3.5":pu35}
     sn = max(safes, key=safes.get); sp_v = safes[sn]
@@ -67,11 +67,11 @@ def analyze_fixture(df, home, away, o1=1.85, ox=3.50, o2=4.20):
     else: combo = f"{tip} & {'Over 1.5' if po15>=0.65 else 'Under 3.5'}"
     evs = {"1":p1*o1-1,"X":px*ox-1,"2":p2*o2-1}; bevs = max(evs, key=evs.get); bev = evs[bevs]
     tags = []
-    if conf >= 8 and {"1":o1,"X":ox,"2":o2}.get(bp,1.45) <= 1.65: tags.append("🔒 Banker")
-    if bev >= 0.05: tags.append(f"💎 Value ({bevs}: +{bev*100:.0f}% EV)")
-    if px >= 0.29 and abs(h5["power"]-a5["power"]) <= 12: tags.append("⚖️ Draw Watch")
-    verdict = f"{home} xG {eh:.2f} vs {away} {ea:.2f}. Safest: {sn} ({sp_v*100:.0f}%) | Combo: {combo}."
-    return {"Match":f"{home} vs {away}","Tip":tip,"Conf":conf,"Safest":f"{sn} ({sp_v*100:.0f}%)","Combo":combo,"1":o1,"X":ox,"2":o2,"O/U 2.5":f"{'Over' if po25>=0.52 else 'Under'} ({po25*100:.0f}%)","BTTS":f"{pbtts*100:.0f}%","Score":ts[0].split(" ")[0],"Category":" | ".join(tags) if tags else "Standard","_raw":{"home":home,"away":away,"eh":eh,"ea":ea,"p1":p1,"px":px,"p2":p2,"p1x":p1x,"px2":px2,"p12":p12,"po15":po15,"po25":po25,"pu25":pu25,"pu35":pu35,"pbtts":pbtts,"png":png,"top_scores":ts,"verdict":verdict,"ev":evs,"h5":h5,"a5":a5,"sprob":sp_v,"bev":bev,"bevs":bevs}}
+    if conf >= 8 and {"1":o1,"X":ox,"2":o2}.get(bp,1.45) <= 1.65: tags.append("Strong Edge")
+    if bev >= 0.05: tags.append(f"+{bev*100:.0f}% EV ({bevs})")
+    if px >= 0.29 and abs(h5["power"]-a5["power"]) <= 12: tags.append("Draw Risk")
+    verdict = f"xG: {home} {eh:.2f} vs {away} {ea:.2f} | Safest: {sn} ({sp_v*100:.0f}%) | Combo: {combo}"
+    return {"Match":f"{home} vs {away}","Market":mkt,"Tip":tip,"Prob":round(cp*100),"Conf":conf,"Safest":f"{sn} ({sp_v*100:.0f}%)","Combo":combo,"1":o1,"X":ox,"2":o2,"O/U 2.5":f"{'Over' if po25>=0.52 else 'Under'} ({po25*100:.0f}%)","BTTS":f"{pbtts*100:.0f}%","Score":ts[0].split(" ")[0],"Category":" • ".join(tags) if tags else "Standard","_raw":{"home":home,"away":away,"eh":eh,"ea":ea,"p1":p1,"px":px,"p2":p2,"p1x":p1x,"px2":px2,"p12":p12,"po15":po15,"po25":po25,"pu25":pu25,"pu35":pu35,"pbtts":pbtts,"png":png,"top_scores":ts,"verdict":verdict,"ev":evs,"h5":h5,"a5":a5,"sprob":sp_v,"bev":bev,"bevs":bevs,"cp":cp}}
 
 def scan_selected_leagues(league_names, odds_dict):
     results = []
@@ -83,7 +83,7 @@ def scan_selected_leagues(league_names, odds_dict):
             fo = find_odds(fh, fa, odds_dict); has_o = bool(fo or eo1)
             o1, ox, o2 = (fo[0], fo[1], fo[2]) if fo else (eo1 or 1.85, eox or 3.50, eo2 or 4.20)
             a = analyze_fixture(df, fh, fa, o1, ox, o2); r = a["_raw"]
-            results.append({"League": lname, "Date": dt, "Match": a["Match"], "Odds": f"{o1}/{ox}/{o2}" if has_o else "-", "Tip": a["Tip"], "Conf": a["Conf"], "Safest": a["Safest"], "SafeProb": r["sprob"], "Combo": a["Combo"], "O/U 2.5": a["O/U 2.5"], "BTTS": a["BTTS"], "Score": a["Score"], "MaxEV": r["bev"] if has_o else 0.0, "BestEVSide": r["bevs"] if has_o else "-", "Data": "Stats"})
+            results.append({"League":lname,"Date":dt,"Match":a["Match"],"Odds":f"{o1}/{ox}/{o2}" if has_o else "-","Market":a["Market"],"Tip":a["Tip"],"Prob":a["Prob"],"Conf":a["Conf"],"Safest":a["Safest"],"SafeProb":r["sprob"],"Combo":a["Combo"],"O/U 2.5":a["O/U 2.5"],"BTTS":a["BTTS"],"Score":a["Score"],"MaxEV":r["bev"] if has_o else 0.0,"BestEVSide":r["bevs"] if has_o else "-","Data":"Stats","LogoH":"","LogoA":"","Verdict":r["verdict"]})
     return sorted(results, key=lambda x: (x["Conf"], x["SafeProb"]), reverse=True)
 
 def scan_goal_date_games(date_iso, gkey, odds_dict, selected_leagues=None, deep_history=True, max_leagues=20):
@@ -96,14 +96,11 @@ def scan_goal_date_games(date_iso, gkey, odds_dict, selected_leagues=None, deep_
         lids, seen = [], set()
         for g in upcoming:
             lid = g.get("LeagueId")
-            if lid and lid not in seen and find_odds(g["Home"], g["Away"], odds_dict):
-                seen.add(lid); lids.append(lid)
+            if lid and lid not in seen and find_odds(g["Home"], g["Away"], odds_dict): seen.add(lid); lids.append(lid)
         for g in upcoming:
             lid = g.get("LeagueId")
-            if lid and lid not in seen:
-                seen.add(lid); lids.append(lid)
-        for lid in lids[:max_leagues]:
-            league_dfs[lid] = load_goal_results_fast(lid, gkey)
+            if lid and lid not in seen: seen.add(lid); lids.append(lid)
+        for lid in lids[:max_leagues]: league_dfs[lid] = load_goal_results_fast(lid, gkey)
     results = []
     for g in upcoming:
         df_h = league_dfs.get(g.get("LeagueId"), pd.DataFrame())
@@ -111,7 +108,7 @@ def scan_goal_date_games(date_iso, gkey, odds_dict, selected_leagues=None, deep_
         o1, ox, o2 = (fo[0], fo[1], fo[2]) if fo else (1.85, 3.50, 4.20)
         a = analyze_fixture(df_h, g["Home"], g["Away"], o1, ox, o2); r = a["_raw"]
         has_hist = (r["h5"]["form"] != "-" or r["a5"]["form"] != "-")
-        results.append({"League": g["League"], "Date": g["DateTime"], "Match": a["Match"], "Odds": f"{o1}/{ox}/{o2}" if has_o else "-", "Tip": a["Tip"], "Conf": a["Conf"], "Safest": a["Safest"], "SafeProb": r["sprob"], "Combo": a["Combo"], "O/U 2.5": a["O/U 2.5"], "BTTS": a["BTTS"], "Score": a["Score"], "MaxEV": r["bev"] if has_o else 0.0, "BestEVSide": r["bevs"] if has_o else "-", "Data": "Stats" if has_hist else ("Odds" if has_o else "NoData")})
+        results.append({"League":g["League"],"Date":g["DateTime"],"Match":a["Match"],"Odds":f"{o1}/{ox}/{o2}" if has_o else "-","Market":a["Market"],"Tip":a["Tip"],"Prob":a["Prob"],"Conf":a["Conf"],"Safest":a["Safest"],"SafeProb":r["sprob"],"Combo":a["Combo"],"O/U 2.5":a["O/U 2.5"],"BTTS":a["BTTS"],"Score":a["Score"],"MaxEV":r["bev"] if has_o else 0.0,"BestEVSide":r["bevs"] if has_o else "-","Data":"Stats" if has_hist else ("Odds" if has_o else "NoData"),"LogoH":g.get("LogoH",""),"LogoA":g.get("LogoA",""),"Verdict":r["verdict"]})
     return sorted(results, key=lambda x: (1 if x["Data"]=="Stats" else (0.5 if x["Data"]=="Odds" else 0), x["Conf"], x["SafeProb"]), reverse=True), ""
 
 def build_ctx(res, h2h, comp):
@@ -121,39 +118,4 @@ def build_ctx(res, h2h, comp):
 def smart_advisor(res, q):
     r = res["_raw"]
     mkts = sorted([(f"{r['home']} (1)",r["p1"]),("Draw (X)",r["px"]),(f"{r['away']} (2)",r["p2"]),("1X",r["p1x"]),("X2",r["px2"]),("Over 1.5",r["po15"]),("Over 2.5",r["po25"]),("Under 2.5",r["pu25"]),("Under 3.5",r["pu35"]),("BTTS Yes",r["pbtts"]),("BTTS No",r["png"])], key=lambda x:x[1], reverse=True)
-    return f"**Smart Analysis: {res['Match']}**\n\n🎯 **Best Pick:** **{mkts[0][0]}** (`{mkts[0][1]*100:.1f}%`) | **Combo:** `{res['Combo']}`\n\n1. **{mkts[0][0]}** — `{mkts[0][1]*100:.1f}%`\n2. **{mkts[1][0]}** — `{mkts[1][1]*100:.1f}%`\n3. **{mkts[2][0]}** — `{mkts[2][1]*100:.1f}%`\n\n💎 **Best Value:** `{r['bevs']}` (`{r['bev']*100:+.1f}%` EV) | **Scores:** {', '.join(r['top_scores'])}"
-
-def ask_llm(prov, key, sys_p, hist, q):
-    k = key.strip()
-    if prov == "Groq (Free AI)":
-        msgs = [{"role":"system","content":sys_p}] + [{"role":m["role"],"content":m["content"]} for m in hist[-6:]] + [{"role":"user","content":q}]
-        err = ""
-        for m in ["openai/gpt-oss-120b","openai/gpt-oss-20b","qwen/qwen3.8-27b"]:
-            try:
-                r = requests.post("https://api.groq.com/openai/v1/chat/completions", headers={"Authorization":f"Bearer {k}","Content-Type":"application/json"}, json={"model":m,"messages":msgs,"temperature":0.3}, timeout=25)
-                if r.status_code == 200: return r.json()["choices"][0]["message"]["content"]
-                err = f"Groq Error {r.status_code}: {r.text[:150]}"
-            except Exception as e: err = str(e)
-        return err
-    contents = [{"role":"user" if m["role"]=="user" else "model","parts":[{"text":m["content"]}]} for m in hist[-6:]] + [{"role":"user","parts":[{"text":q}]}]
-    err = ""
-    for m in ["gemini-3.8-flash","gemini-3.5-flash-lite","gemini-3.6-flash","gemini-flash-latest"]:
-        try:
-            r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={k}", headers={"Content-Type":"application/json"}, json={"system_instruction":{"parts":[{"text":sys_p}]},"contents":contents,"generationConfig":{"temperature":0.3}}, timeout=25)
-            if r.status_code == 200: return r.json()["candidates"][0]["content"]["parts"][0]["text"]
-            err = f"Gemini Error {r.status_code}: {r.text[:150]}"
-        except Exception as e: err = str(e)
-    return err
-
-def command_ai_multi(prov, key, games, cmd):
-    valid = [g for g in games if g.get("Data", "Stats") != "NoData"] or games
-    if not valid: return "No upcoming games found to analyze."
-    if prov == "Built-in Smart Advisor (No Key)" or not key.strip():
-        top = valid[:6]
-        lines = [f"**🤖 Smart Daily Picks (Top {len(top)} Backed by Stats/Odds):**\n"]
-        for i, g in enumerate(top, 1):
-            lines.append(f"{i}. **{g['Match']}** ({g['League']} | {g['Date']}) → **{g['Safest']}** | Tip: `{g['Tip']}` ({g['Conf']}/10) | Combo: `{g['Combo']}` | O/U: `{g['O/U 2.5']}` | Score: `{g['Score']}`")
-        return "\n".join(lines)
-    summary = "\n".join([f"- [{g.get('Data','Stats')}] {g['Date']} | {g['League']} | {g['Match']} | Odds={g['Odds']} | Tip={g['Tip']}({g['Conf']}/10) | Safest={g['Safest']} | Combo={g['Combo']} | O/U={g['O/U 2.5']} | BTTS={g['BTTS']} | EV={g['BestEVSide']}({g['MaxEV']*100:+.0f}%)" for g in valid[:35]])
-    sys_p = f"You are the user's personal football betting commander. Here are the best analyzed upcoming games from their selected leagues/date:\n{summary}\n\nSelect ONLY from these matches (prefer [Stats] over [Odds]). Choose the best games and best single/combo options for the user's command, explain briefly with the numbers, and state any risk."
-    return ask_llm(prov, key, sys_p, [], cmd)
+    return f"**Analytical Breakdown — {res['Match']}**\n\n**Top Recommendation:** {mkts[0][0]} (`{mkts[0][1]*100:.1f}%`) | **Combo:** `{res['Combo']}`\n\n1. **{mkts[0][0]}** — `{mkts[0][1]*100:.1f}%`\n2. **{mkts[1][0]}** — `{mkts[1][1]*100:.1f}%`\n3. **{mkts[2][0]}** — `{mkts[2][1]*100:.1f}%`\n\n**Value Edge:** `{r['bevs']}` (`{r['bev']*100:+.1f}%` EV) | **Top Scores:** {'
