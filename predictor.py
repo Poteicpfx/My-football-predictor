@@ -4,7 +4,7 @@ from scipy.stats import poisson
 from data_sources import *
 
 def get_metrics(df, team, venue="all", last_n=5):
-    base = {"form":"-","gf":1.2,"ga":1.2,"o15":60,"o25":45,"o35":20,"btts":50,"corners":0.0,"shots_ot":0.0,"power":50.0}
+    base = {"form":"-","gf":1.25,"ga":1.25,"o15":60,"o25":45,"o35":20,"btts":50,"corners":0.0,"shots_ot":0.0,"power":50.0}
     if df.empty: return base
     if venue == "home": g = df[df["HomeTeam"] == team].tail(last_n)
     elif venue == "away": g = df[df["AwayTeam"] == team].tail(last_n)
@@ -27,9 +27,12 @@ def get_metrics(df, team, venue="all", last_n=5):
         if hc and pd.notna(r["HC"]) and pd.notna(r["AC"]): ct += r["HC"] if ih else r["AC"]
         if hs and pd.notna(r["HST"]) and pd.notna(r["AST"]): stt += r["HST"] if ih else r["AST"]
     n = len(g)
-    pwr = float(np.clip((pts / (n * 3)) * 65 + ((gft - gat) / n) * 10 + 18, 10, 99))
+    # Regression to mean: smooth small sample goals toward 1.25
+    smooth_gf = (gft + 2.5) / (n + 2.0)
+    smooth_ga = (gat + 2.5) / (n + 2.0)
+    pwr = float(np.clip((pts / (n * 3)) * 60 + ((smooth_gf - smooth_ga)) * 12 + 20, 15, 90))
     return {
-        "form": "".join(fm), "gf": round(gft/n, 2), "ga": round(gat/n, 2),
+        "form": "".join(fm), "gf": round(smooth_gf, 2), "ga": round(smooth_ga, 2),
         "o15": round(o15/n*100), "o25": round(o25/n*100), "o35": round(o35/n*100),
         "btts": round(bt/n*100), "corners": round(ct/n, 1) if hc else 0.0,
         "shots_ot": round(stt/n, 1) if hs else 0.0, "power": round(pwr, 1),
@@ -40,53 +43,89 @@ def get_h2h(df, h, a):
     q = df[((df["HomeTeam"] == h) & (df["AwayTeam"] == a)) | ((df["HomeTeam"] == a) & (df["AwayTeam"] == h))].tail(5)
     return pd.DataFrame() if q.empty else q[["Date", "HomeTeam", "FTHG", "FTAG", "AwayTeam"]].iloc[::-1]
 
+def dixon_coles_weight(i, j, eh, ea, rho=-0.08):
+    if i == 0 and j == 0: return max(0.1, 1.0 - eh * ea * rho)
+    if i == 0 and j == 1: return max(0.1, 1.0 + eh * rho)
+    if i == 1 and j == 0: return max(0.1, 1.0 + ea * rho)
+    if i == 1 and j == 1: return max(0.1, 1.0 - rho)
+    return 1.0
+
 def analyze_fixture(df, home, away, o1=1.85, ox=3.50, o2=4.20):
     ha, aa = get_metrics(df, home, "all", 15), get_metrics(df, away, "all", 15)
     h5, a5 = get_metrics(df, home, "home", 5), get_metrics(df, away, "away", 5)
     if h5["form"] == "-" and ha["form"] != "-": h5 = ha
     if a5["form"] == "-" and aa["form"] != "-": a5 = aa
+    
+    ahg = max(float(df["FTHG"].mean()), 0.6) if not df.empty else 1.35
+    aag = max(float(df["FTAG"].mean()), 0.5) if not df.empty else 1.15
+
     if h5["form"] == "-" and a5["form"] == "-" and o1 > 1.01 and ox > 1.01 and o2 > 1.01:
         si = (1/o1) + (1/ox) + (1/o2)
-        eh = float(np.clip(0.8 + ((1/o1)/si)*1.9, 0.4, 3.0))
-        ea = float(np.clip(0.7 + ((1/o2)/si)*1.8, 0.4, 3.0))
+        p1_imp, p2_imp = (1/o1)/si, (1/o2)/si
+        eh = float(np.clip(0.85 + p1_imp * 1.55, 0.6, 2.75))
+        ea = float(np.clip(0.70 + p2_imp * 1.45, 0.5, 2.50))
     else:
-        ahg = max(float(df["FTHG"].mean()), 0.5) if not df.empty else 1.35
-        aag = max(float(df["FTAG"].mean()), 0.5) if not df.empty else 1.15
-        eh = float(np.clip(((h5["gf"]*0.65+ha["gf"]*0.35)/ahg)*((a5["ga"]*0.65+aa["ga"]*0.35)/ahg)*ahg, 0.25, 4.0))
-        ea = float(np.clip(((a5["gf"]*0.65+aa["gf"]*0.35)/aag)*((h5["ga"]*0.65+ha["ga"]*0.35)/aag)*aag, 0.25, 4.0))
-    mat = np.array([[poisson.pmf(i, eh)*poisson.pmf(j, ea) for j in range(7)] for i in range(7)])
+        raw_eh = ((h5["gf"]*0.60 + ha["gf"]*0.40) / ahg) * ((a5["ga"]*0.60 + aa["ga"]*0.40) / ahg) * ahg
+        raw_ea = ((a5["gf"]*0.60 + aa["gf"]*0.40) / aag) * ((h5["ga"]*0.60 + ha["ga"]*0.40) / aag) * aag
+        # Regress extreme xG back toward league averages (stops runaway 1.08 locks)
+        eh = float(np.clip(raw_eh * 0.72 + ahg * 0.28, 0.55, 2.85))
+        ea = float(np.clip(raw_ea * 0.72 + aag * 0.28, 0.45, 2.55))
+
+    mat = np.zeros((7, 7))
+    for i in range(7):
+        for j in range(7):
+            base_p = poisson.pmf(i, eh) * poisson.pmf(j, ea)
+            mat[i, j] = base_p * dixon_coles_weight(i, j, eh, ea, -0.08)
+    
+    # Normalize probabilities to sum to exactly 1.0
+    mat = mat / np.sum(mat)
+
     p1 = float(np.sum(np.tril(mat, -1)))
     px = float(np.sum(np.diag(mat)))
     p2 = float(np.sum(np.triu(mat, 1)))
+
+    # Real-world cap: in league soccer, single-match win probability rarely exceeds 78%
+    p1 = min(p1, 0.78)
+    p2 = min(p2, 0.78)
+    tot = p1 + px + p2
+    p1, px, p2 = p1/tot, px/tot, p2/tot
     p1x, px2, p12 = p1 + px, p2 + px, p1 + p2
+
     po15 = float(sum(mat[i,j] for i in range(7) for j in range(7) if i+j > 1))
     po25 = float(sum(mat[i,j] for i in range(7) for j in range(7) if i+j > 2))
     pu25 = 1.0 - po25
     pu35 = 1.0 - float(sum(mat[i,j] for i in range(7) for j in range(7) if i+j > 3))
     pbtts = float(sum(mat[i,j] for i in range(1,7) for j in range(1,7)))
     png = 1.0 - pbtts
+
     ts = [f"{np.unravel_index(k,mat.shape)[0]}:{np.unravel_index(k,mat.shape)[1]} ({mat.ravel()[k]*100:.0f}%)" for k in np.argsort(mat.ravel())[::-1][:3]]
     probs = {"1": p1, "X": px, "2": p2}
     bp = max(probs, key=probs.get); bpr = probs[bp]
-    if bp == "1" and bpr < 0.52 and p1x >= 0.72: tip, cp, mkt = "1X", p1x, "Double Chance"
-    elif bp == "2" and bpr < 0.52 and px2 >= 0.72: tip, cp, mkt = "X2", px2, "Double Chance"
+    
+    # Conservative Double Chance shift when outright win is below 54%
+    if bp == "1" and bpr < 0.54 and p1x >= 0.70: tip, cp, mkt = "1X", p1x, "Double Chance"
+    elif bp == "2" and bpr < 0.54 and px2 >= 0.70: tip, cp, mkt = "X2", px2, "Double Chance"
     else: tip, cp, mkt = bp, bpr, "Match Result (1X2)"
-    conf = int(np.clip(round((cp - 0.25) / 0.60 * 9 + 1), 1, 10))
+
+    conf = int(np.clip(round((cp - 0.28) / 0.52 * 9 + 1), 1, 10))
     safes = {"1X": p1x, "X2": px2, "12": p12, "Over 1.5": po15, "Under 3.5": pu35}
     sn = max(safes, key=safes.get); sp_v = safes[sn]
-    if p1 >= 0.55 and po15 >= 0.68: combo = "1 & Over 1.5"
-    elif p2 >= 0.55 and po15 >= 0.68: combo = "2 & Over 1.5"
+
+    if p1 >= 0.54 and po15 >= 0.68: combo = "1 & Over 1.5"
+    elif p2 >= 0.54 and po15 >= 0.68: combo = "2 & Over 1.5"
     elif p1x >= 0.72 and pu35 >= 0.65: combo = "1X & Under 3.5"
     elif px2 >= 0.72 and pu35 >= 0.65: combo = "X2 & Under 3.5"
-    elif po25 >= 0.55 and pbtts >= 0.55: combo = "Over 2.5 & BTTS"
+    elif po25 >= 0.54 and pbtts >= 0.54: combo = "Over 2.5 & BTTS"
     else: combo = f"{tip} & {'Over 1.5' if po15 >= 0.65 else 'Under 3.5'}"
+
     evs = {"1": p1*o1-1, "X": px*ox-1, "2": p2*o2-1}
     bevs = max(evs, key=evs.get); bev = evs[bevs]
     tags = []
     if conf >= 8 and {"1":o1,"X":ox,"2":o2}.get(bp, 1.45) <= 1.65: tags.append("Strong Edge")
     if bev >= 0.05: tags.append(f"+{bev*100:.0f}% EV ({bevs})")
-    if px >= 0.29 and abs(h5["power"] - a5["power"]) <= 12: tags.append("Draw Risk")
+    if px >= 0.28 and abs(h5["power"] - a5["power"]) <= 14: tags.append("Draw Risk")
     verdict = f"xG: {home} {eh:.2f} vs {away} {ea:.2f} | Safest: {sn} ({sp_v*100:.0f}%) | Combo: {combo}"
+    
     return {
         "Match": f"{home} vs {away}", "Market": mkt, "Tip": tip, "Prob": round(cp*100),
         "Conf": conf, "Safest": f"{sn} ({sp_v*100:.0f}%)", "Combo": combo,
