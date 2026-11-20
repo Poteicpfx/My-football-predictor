@@ -14,7 +14,7 @@ def _parse_espn(events, fb="Soccer"):
         lgl = ev.get("leagues") or []
         lgn = lgl[0].get("name") if lgl and isinstance(lgl[0], dict) else None
         lg = (ev.get("season") or {}).get("slug") or lgn or fb
-        out.append({"DateTime": (ev.get("date") or "")[:16].replace("T", " "), "League": lg, "Home": hn, "Away": an, "Status": sti.get("shortDetail", "Scheduled"), "1": o1, "X": ox, "2": o2, "Bookie": bk, "LeagueId": None})
+        out.append({"DateTime": (ev.get("date") or "")[:16].replace("T", " "), "League": lg, "Home": hn, "Away": an, "Status": sti.get("shortDetail", "Scheduled"), "1": o1, "X": ox, "2": o2, "Bookie": bk, "LeagueId": None, "IsFinished": sti.get("state") == "post"})
     return out
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -70,7 +70,7 @@ def load_espn(slug):
 @st.cache_data(ttl=900)
 def load_goal_by_date(date_iso, key):
     hdr = {"Authorization": f"Bearer {key.strip()}"}; items, err = [], ""
-    for off in [0, 100]:
+    for off in [0, 100, 200, 300]:
         try:
             r = requests.get(f"https://api.goal-api.com/v1/fixtures/date/{date_iso}", params={"limit": 100, "offset": off}, headers=hdr, timeout=15)
             if r.status_code == 401: return [], "❌ Invalid GOAL API key."
@@ -82,8 +82,28 @@ def load_goal_by_date(date_iso, key):
     for m in items:
         h, a = (m.get("homeTeam") or {}).get("name") or m.get("homeTeamName"), (m.get("awayTeam") or {}).get("name") or m.get("awayTeamName")
         if not h or not a: continue
-        games.append({"DateTime": (m.get("kickoffUtc") or date_iso)[:16].replace("T", " "), "League": (m.get("league") or {}).get("name") or m.get("leagueName") or "League", "Home": h, "Away": a, "Status": m.get("matchStatus") or "Scheduled", "1": None, "X": None, "2": None, "Bookie": "", "LeagueId": (m.get("league") or {}).get("id") or m.get("leagueId")})
+        per, stt = str(m.get("matchPeriod") or "").upper(), str(m.get("matchStatus") or "").upper()
+        is_fin = per == "FINISHED" or stt in ("FINISHED", "FT", "AET", "PEN", "AFTER PEN.", "PLAYED")
+        games.append({"DateTime": (m.get("kickoffUtc") or date_iso)[:16].replace("T", " "), "League": (m.get("league") or {}).get("name") or m.get("leagueName") or "League", "Home": h, "Away": a, "Status": m.get("matchStatus") or "Scheduled", "1": None, "X": None, "2": None, "Bookie": "", "LeagueId": (m.get("league") or {}).get("id") or m.get("leagueId"), "IsFinished": is_fin})
     return games, ("" if items or not err else err)
+
+@st.cache_data(ttl=3600)
+def load_goal_results_fast(lid, key):
+    try:
+        r = requests.get(f"https://api.goal-api.com/v1/leagues/{lid}/results", params={"limit": 100}, headers={"Authorization": f"Bearer {key.strip()}"}, timeout=10)
+        if r.status_code != 200: return pd.DataFrame()
+        rows = []
+        for m in r.json().get("data") or []:
+            h, a = (m.get("homeTeam") or {}).get("name") or m.get("homeTeamName"), (m.get("awayTeam") or {}).get("name") or m.get("awayTeamName")
+            hs = m.get("homeScore") if m.get("homeScore") is not None else m.get("homeTeamScore")
+            as_ = m.get("awayScore") if m.get("awayScore") is not None else m.get("awayTeamScore")
+            if h and a and hs is not None and as_ is not None:
+                try: rows.append({"Date": (m.get("kickoffUtc") or "")[:10], "HomeTeam": h, "AwayTeam": a, "FTHG": int(float(hs)), "FTAG": int(float(as_))})
+                except (ValueError, TypeError): pass
+        df = pd.DataFrame(rows)
+        if not df.empty: df["DateParsed"] = pd.to_datetime(df["Date"], errors="coerce"); df = df.sort_values("DateParsed").reset_index(drop=True)
+        return df
+    except Exception: return pd.DataFrame()
 
 @st.cache_data(ttl=3600)
 def load_main_csv(code):
