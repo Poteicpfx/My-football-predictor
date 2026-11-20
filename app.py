@@ -21,7 +21,6 @@ if "ai_messages" not in st.session_state: st.session_state.ai_messages = pr.load
 if "cmd_result" not in st.session_state: st.session_state.cmd_result = ""
 if "cmd_games" not in st.session_state: st.session_state.cmd_games = []
 
-# --- SIDEBAR ---
 st.sidebar.header("🔑 Keys (Auto-Loaded from Secrets)")
 gkey = st.sidebar.text_input("GOAL API Key (1,000+ Leagues)", value=pr.get_secret("GOAL_API_KEY", prefs.get("gkey", "")), type="password")
 okey = st.sidebar.text_input("The Odds API Key (Live Odds)", value=pr.get_secret("ODDS_API_KEY", prefs.get("okey", "")), type="password")
@@ -68,7 +67,6 @@ sec_ai = pr.get_secret("GROQ_API_KEY") if ai_prov == "Groq (Free AI)" else (pr.g
 ai_key = st.sidebar.text_input("Paste Free AI Key", value=sec_ai, type="password") if ai_prov != ai_provs[0] else ""
 odds_events, odds_dict, odds_err = pr.load_the_odds_api(okey)
 
-# --- HEADER & TABS ---
 st.markdown('<div class="hero-banner"><h2 style="margin:0;color:#ecfdf5;">⚽ World Football Predictor Pro</h2><div style="color:#a7f3d0;font-size:0.9rem;">Games by Date • Auto Odds • AI Multi-League Commander • Persistent Memory</div></div>', unsafe_allow_html=True)
 tab_date, tab_board, tab_ai, tab_daily, tab_track = st.tabs(["📅 Games by Date", "🔍 League Analyzer", "🤖 AI Commander", "🔥 Daily Tips", "📒 Bet Tracker"])
 cur_res, cur_h2h, cur_comp = None, pd.DataFrame(), selected_comp
@@ -96,7 +94,7 @@ with tab_date:
         if (not g["1"] or not g["X"] or not g["2"]) and odds_dict:
             fd = pr.find_odds(g["Home"], g["Away"], odds_dict)
             if fd: g["1"], g["X"], g["2"], g["Bookie"] = fd
-    if not date_games: st.info("No matches found for this date. Try another date or switch the Date Feed.")
+    if not date_games: st.info("No matches found for this date.")
     else:
         st.caption(f"Found **{len(date_games)}** matches for **{picked_date.strftime('%Y-%m-%d')}**")
         st.dataframe(pd.DataFrame([{"Time":g["DateTime"][11:] or g["DateTime"],"Competition":g["League"],"Home":g["Home"],"Away":g["Away"],"Status":g.get("Status","Scheduled"),"1":g["1"] or "-","X":g["X"] or "-","2":g["2"] or "-","Source":g["Bookie"] or "-"} for g in date_games]), hide_index=True, use_container_width=True)
@@ -130,10 +128,10 @@ with tab_board:
         if upcoming_fixtures:
             rows = []
             for dt, fh, fa, eo1, eox, eo2, _ in upcoming_fixtures:
-                fo = pr.find_odds(fh, fa, odds_dict)
+                fo = pr.find_odds(fh, fa, odds_dict); has_o = bool(fo or eo1)
                 u1, ux, u2 = (fo[0], fo[1], fo[2]) if fo else (eo1 or 1.85, eox or 3.50, eo2 or 4.20)
                 a = pr.analyze_fixture(df_league, fh, fa, u1, ux, u2)
-                rows.append({"Date":dt,"Match":a["Match"],"1/X/2":f"{u1}/{ux}/{u2}","Tip":f"{a['Tip']} ({a['Conf']}/10)","Safest":a["Safest"],"Combo":a["Combo"],"O/U 2.5":a["O/U 2.5"],"BTTS":a["BTTS"],"Score":a["Score"]})
+                rows.append({"Date":dt,"Match":a["Match"],"1/X/2":f"{u1}/{ux}/{u2}" if has_o else "-","Tip":f"{a['Tip']} ({a['Conf']}/10)","Safest":a["Safest"],"Combo":a["Combo"],"O/U 2.5":a["O/U 2.5"],"BTTS":a["BTTS"],"Score":a["Score"]})
             st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True); st.divider()
         dh = teams.index(prefs["home_t"]) if prefs.get("home_t") in teams else 0
         da = teams.index(prefs["away_t"]) if prefs.get("away_t") in teams else min(1, len(teams)-1)
@@ -175,29 +173,55 @@ with tab_board:
             ca.info(f"✈️ **{away_t} (L5 Away):** `{a5['form']}` | Power `{a5['power']}` | GF `{a5['gf']}` GA `{a5['ga']}`")
 
 with tab_ai:
-    ai_mode = st.radio("AI Mode", ["🌍 Command AI Across Selected Leagues", "🎯 Ask About Active Match"], horizontal=True)
-    if ai_mode.startswith("🌍"):
-        st.subheader("🤖 Multi-League AI Commander")
-        picked_lgs = st.multiselect("1. Choose Leagues to Scan", list(pr.SCAN_LEAGUES.keys()), default=["🇬🇧 Premier League", "🇪🇸 La Liga", "🏆 UEFA Champions League", "🟠 UEFA Europa League"])
+    ai_mode = st.radio("AI Mode", ["📅 Daily 1,000+ Leagues (GOAL API)", "🌍 Top Leagues (ESPN Free)", "🎯 Ask About Active Match"], horizontal=True)
+    if ai_mode.startswith("📅"):
+        st.subheader("🤖 Daily 1,000+ Leagues AI Commander")
+        if not gkey: st.warning("Save or paste your GOAL API Key in the sidebar to load all 1,000+ leagues by date.")
+        else:
+            cmd_dt = st.date_input("Choose Date to Scan", value=datetime.now().date(), key="cmd_dt")
+            raw_day, day_err = pr.load_goal_by_date(cmd_dt.strftime("%Y-%m-%d"), gkey)
+            if day_err: st.warning(day_err)
+            avail_up = [g for g in raw_day if not g.get("IsFinished")]
+            avail_lgs = sorted({g["League"] for g in avail_up})
+            st.caption(f"Found **{len(avail_up)}** playable games across **{len(avail_lgs)}** leagues on **{cmd_dt.strftime('%Y-%m-%d')}**")
+            picked_dlgs = st.multiselect("Filter Specific Leagues (leave blank = auto-scan top 20 leagues)", avail_lgs, key="cmd_dlgs")
+            cc = st.columns(3); qcmd = None
+            if cc[0].button("🎯 Top 5 Best Picks", key="d_c1", use_container_width=True): qcmd = "Pick the 5 best and safest games from today's list and give the single best option for each."
+            if cc[1].button("🔒 4-Leg Safe Acca", key="d_c2", use_container_width=True): qcmd = "Build a 4-leg accumulator ticket using only the safest Double Chance or Over 1.5 options."
+            if cc[2].button("⚽ Best Goals / BTTS", key="d_c3", use_container_width=True): qcmd = "Select the best Over 1.5, Over 2.5, or BTTS picks from today's games."
+            with st.form("daily_cmd_form", clear_on_submit=False):
+                tcmd = st.text_input("Command your AI:", placeholder="e.g. Pick 3 safest games and 1 value bet from today's leagues")
+                csub = st.form_submit_button("Analyze Date & Command AI 🚀")
+            cmd_txt = qcmd if qcmd else (tcmd.strip() if csub and tcmd.strip() else None)
+            if cmd_txt:
+                with st.spinner("Deep-analyzing team stats across today's leagues..."):
+                    games, gerr = pr.scan_goal_date_games(cmd_dt.strftime("%Y-%m-%d"), gkey, odds_dict, picked_dlgs or None, True, 20)
+                    if gerr: st.error(gerr)
+                    st.session_state.cmd_games = games
+                    st.session_state.cmd_result = pr.command_ai_multi(ai_prov, ai_key, games, cmd_txt)
+            if st.session_state.cmd_result: st.markdown(f'<div class="glass-card">{st.session_state.cmd_result}</div>', unsafe_allow_html=True)
+            if st.session_state.cmd_games:
+                with st.expander(f"📋 All Analyzed Games ({len(st.session_state.cmd_games)})"):
+                    st.dataframe(pd.DataFrame(st.session_state.cmd_games)[["Date","League","Match","Data","Odds","Tip","Conf","Safest","Combo","O/U 2.5","BTTS","Score"]], hide_index=True, use_container_width=True)
+    elif ai_mode.startswith("🌍"):
+        st.subheader("🤖 Top Leagues AI Commander (ESPN)")
+        picked_lgs = st.multiselect("Choose Leagues", list(pr.SCAN_LEAGUES.keys()), default=["🇬🇧 Premier League", "🇪🇸 La Liga", "🏆 UEFA Champions League", "🟠 UEFA Europa League"])
         cc = st.columns(3); qcmd = None
-        if cc[0].button("🎯 Top 3 Safest Picks", use_container_width=True): qcmd = "Pick the 3 safest matches across these leagues and choose the single best option for each."
-        if cc[1].button("🔥 4-Leg Acca Ticket", use_container_width=True): qcmd = "Build a 4-leg accumulator ticket using the safest Double Chance or Over 1.5 options."
-        if cc[2].button("💎 Best Value Bets", use_container_width=True): qcmd = "Find the best high-value (+EV) picks and explain the odds edge."
+        if cc[0].button("🎯 Top 3 Safest", key="e_c1", use_container_width=True): qcmd = "Pick the 3 safest matches across these leagues and choose the single best option for each."
+        if cc[1].button("🔥 4-Leg Acca", key="e_c2", use_container_width=True): qcmd = "Build a 4-leg accumulator ticket using the safest Double Chance or Over 1.5 options."
+        if cc[2].button("💎 Value Bets", key="e_c3", use_container_width=True): qcmd = "Find the best high-value (+EV) picks and explain the odds edge."
         with st.form("cmd_form", clear_on_submit=False):
-            tcmd = st.text_input("2. Command your AI:", placeholder="e.g. Select 3 best games from Premier League and Europa League and give the safest option for each")
+            tcmd = st.text_input("Command your AI:", placeholder="e.g. Select 3 best games from Premier League and Europa League")
             csub = st.form_submit_button("Run AI Commander 🚀")
         cmd_text = qcmd if qcmd else (tcmd.strip() if csub and tcmd.strip() else None)
-        if cmd_text:
-            if not picked_lgs: st.warning("Select at least 1 league.")
-            else:
-                with st.spinner("Scanning leagues & analyzing all upcoming games..."):
-                    games = pr.scan_selected_leagues(picked_lgs, odds_dict)
-                    st.session_state.cmd_games = games
-                    st.session_state.cmd_result = pr.command_ai_multi(ai_prov, ai_key, games, cmd_text)
-        if st.session_state.cmd_result:
-            st.markdown(f'<div class="glass-card">{st.session_state.cmd_result}</div>', unsafe_allow_html=True)
+        if cmd_text and picked_lgs:
+            with st.spinner("Scanning leagues..."):
+                games = pr.scan_selected_leagues(picked_lgs, odds_dict)
+                st.session_state.cmd_games = games
+                st.session_state.cmd_result = pr.command_ai_multi(ai_prov, ai_key, games, cmd_text)
+        if st.session_state.cmd_result: st.markdown(f'<div class="glass-card">{st.session_state.cmd_result}</div>', unsafe_allow_html=True)
         if st.session_state.cmd_games:
-            with st.expander(f"📋 View All Scanned Games ({len(st.session_state.cmd_games)})"):
+            with st.expander(f"📋 Scanned Games ({len(st.session_state.cmd_games)})"):
                 st.dataframe(pd.DataFrame(st.session_state.cmd_games)[["Date","League","Match","Odds","Tip","Conf","Safest","Combo","Score"]], hide_index=True, use_container_width=True)
     else:
         st.subheader("🎯 Single-Match AI Chat")
