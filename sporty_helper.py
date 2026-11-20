@@ -1,4 +1,4 @@
-import re
+import html, re
 
 SPORTY_MENU = {
     "1": "1X2 → Home (1)",
@@ -84,3 +84,53 @@ def build_sporty_ticket(items, style="🔒 Safest Acca", max_legs=5, stake=1000.
     lines.append("=" * 42)
     lines.append(f"Total Est. Odds: {total_odds} | Stake: ₦{stake:,.0f} → Est. Win: ₦{est_payout:,.0f}")
     return legs, total_odds, est_payout, "\n".join(lines)
+
+def render_date_cards(games):
+    cards = []
+    for g in games:
+        lg = html.escape(str(g.get("League", "Soccer")))
+        tm = html.escape(str(g.get("DateTime", ""))[-5:] or str(g.get("DateTime", "")))
+        hm = html.escape(str(g.get("Home", "")))
+        aw = html.escape(str(g.get("Away", "")))
+        st_t = html.escape(str(g.get("Status", "Scheduled")))
+        if g.get("1") and g.get("X") and g.get("2"):
+            odds_h = f'<span class="p-green">1: {g["1"]}</span><span class="p-blue">X: {g["X"]}</span><span class="p-gold">2: {g["2"]}</span>'
+        else:
+            odds_h = '<span class="p-muted">No live odds yet</span>'
+        cards.append(f'<div class="mcard"><div class="mmeta">{lg} • {tm} • {st_t}</div><div class="mtitle">{hm} vs {aw}</div><div class="prow">{odds_h}</div></div>')
+    return "".join(cards)
+
+def render_analysis_cards(rows):
+    cards = []
+    for r in rows:
+        dt = html.escape(str(r.get("Date", "")))
+        lg = f"{html.escape(str(r['League']))} • " if r.get("League") else ""
+        odds_t = html.escape(str(r.get("1/X/2") or r.get("Odds") or "-"))
+        match_t = html.escape(str(r.get("Match", "")))
+        tip_t = html.escape(f"{r.get('Tip', '-')} ({r['Conf']}/10)" if "Conf" in r else str(r.get("Tip", "-")))
+        safe_t = html.escape(str(r.get("Safest", "-")))
+        combo_t = html.escape(str(r.get("Combo", "-")))
+        ou_t = html.escape(str(r.get("O/U 2.5", "-")))
+        btts_t = html.escape(str(r.get("BTTS", "-")))
+        sc_t = html.escape(str(r.get("Score", "-")))
+        cards.append(
+            f'<div class="mcard">'
+            f'<div class="mmeta">{lg}{dt} • Odds: {odds_t}</div>'
+            f'<div class="mtitle">{match_t}</div>'
+            f'<div class="prow"><span class="p-green">Tip: {tip_t}</span><span class="p-blue">Safe: {safe_t}</span><span class="p-gold">Combo: {combo_t}</span></div>'
+            f'<div class="mfoot">O/U 2.5: <b>{ou_t}</b> &nbsp;|&nbsp; BTTS: <b>{btts_t}</b> &nbsp;|&nbsp; Score: <b>{sc_t}</b></div>'
+            f'</div>'
+        )
+    return "".join(cards)
+
+def render_sporty_cards(legs):
+    cards = []
+    for i, l in enumerate(legs, 1):
+        cards.append(
+            f'<div class="mcard">'
+            f'<div class="mmeta">LEG #{i} • {html.escape(str(l["League"]))}</div>'
+            f'<div class="mtitle">{html.escape(str(l["Match"]))}</div>'
+            f'<div class="prow"><span class="p-green">▶ {html.escape(str(l["SportyBet Menu"]))}</span><span class="p-blue">Prob: {html.escape(str(l["Prob"]))}</span><span class="p-gold">~{l["Est. Odd"]}</span></div>'
+            f'</div>'
+        )
+    return "".join(cards)
