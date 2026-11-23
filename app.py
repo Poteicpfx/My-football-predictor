@@ -103,20 +103,23 @@ with tab_date:
             if fd: g["1"], g["X"], g["2"], g["Bookie"] = fd
     if not date_games: st.info("No matches found for this date.")
     else:
-        ml = ["-- Pick a Match to Analyze --"] + [f"{g['League']} | {g['Home']} vs {g['Away']}" for g in date_games]
-        cm = st.selectbox("🎯 Analyze Any Match From This Date", ml)
+        fc1, fc2 = st.columns([2.2, 1])
+        avail_dl = sorted({g["League"] for g in date_games})
+        f_lgs = fc1.multiselect("Filter Leagues (optional)", avail_dl, key="dt_flg")
+        hide_fin = fc2.checkbox("Hide Finished", value=True, key="dt_hfin")
+        filtered = [g for g in date_games if (not f_lgs or g["League"] in f_lgs) and (not hide_fin or not g.get("IsFinished"))]
+        if not filtered: filtered = date_games
+        ml = ["-- Pick a Match for Deep View --"] + [f"{g['League']} | {g['Home']} vs {g['Away']}" for g in filtered]
+        cm = st.selectbox("🎯 Inspect Match", ml)
         if cm != ml[0]:
-            g = date_games[ml.index(cm)-1]
-            df_mh = pr.load_goal_fixtures(g["LeagueId"], gkey)[0] if (g.get("LeagueId") and gkey) else pd.DataFrame()
+            g = filtered[ml.index(cm)-1]
+            df_mh = pr.load_goal_fixtures(g["LeagueId"], gkey)[0] if (g.get("LeagueId") and gkey) else pr._match_builtin_df(g.get("League", ""))
             o1a, oxa, o2a = float(g["1"] or 1.90), float(g["X"] or 3.40), float(g["2"] or 3.90)
             rd = pr.analyze_fixture(df_mh, g["Home"], g["Away"], o1a, oxa, o2a); rwd = rd["_raw"]
             cur_res, cur_h2h, cur_comp = rd, pr.get_h2h(df_mh, g["Home"], g["Away"]), g["League"]
-
-            h_p = rwd.get("h_pos", "Pos: N/A")
-            a_p = rwd.get("a_pos", "Pos: N/A")
-            if h_p != "Pos: N/A" and a_p != "Pos: N/A":
-                st.markdown(f'<div class="glass-card"><b>🏆 Standings:</b> {g["Home"]} <span class="p-green">{h_p}</span> vs {g["Away"]} <span class="p-blue">{a_p}</span></div>', unsafe_allow_html=True)
-
+            hp, ap = rwd.get("h_pos", "Pos: N/A"), rwd.get("a_pos", "Pos: N/A")
+            if hp != "Pos: N/A" and ap != "Pos: N/A":
+                st.markdown(f'<div class="glass-card"><b>🏆 Standings:</b> {g["Home"]} <span class="p-green">{hp}</span> vs {g["Away"]} <span class="p-blue">{ap}</span></div>', unsafe_allow_html=True)
             m1,m2,m3,m4,m5 = st.columns(5)
             m1.metric("Tip", f"{rd['Tip']} ({rd['Conf']}/10)"); m2.metric("Safest", rd["Safest"]); m3.metric("Combo", rd["Combo"]); m4.metric("O/U & BTTS", f"{rd['O/U 2.5']} | {rd['BTTS']}"); m5.metric("Odds", f"{o1a}/{oxa}/{o2a}")
             st.markdown(f'<div class="glass-card"><b>🧠 Verdict:</b> {rwd["verdict"]} | <b>Scores:</b> {", ".join(rwd["top_scores"])}</div>', unsafe_allow_html=True)
@@ -127,8 +130,11 @@ with tab_date:
             pod = {"1":o1a,"X":oxa,"2":o2a,"1X":round(1/(1/o1a+1/oxa),2),"X2":round(1/(1/o2a+1/oxa),2)}.get(rd["Tip"], o1a)
             if b2.button("💾 Save to Tracker", key="d_save", use_container_width=True):
                 pr.save_bet(g["League"], rd["Match"], rd["Tip"], rd["Conf"], pod, float(prefs.get("stake", 1000.0))); st.success("Saved!")
-        st.caption(f"Showing **{min(len(date_games), 40)}** of **{len(date_games)}** matches")
-        st.markdown(sh.render_date_cards(date_games[:40]), unsafe_allow_html=True)
+        view_games = filtered[:35]
+        st.caption(f"Analyzing & showing **{len(view_games)}** of **{len(filtered)}** matches")
+        with st.spinner("Generating predictions for displayed games..."):
+            pred_rows = pr.enrich_date_games(view_games, gkey, odds_dict, 25)
+        st.markdown(sh.render_analysis_cards(pred_rows), unsafe_allow_html=True)
 
 with tab_board:
     if load_err: st.error(load_err)
@@ -161,28 +167,23 @@ with tab_board:
         if home_t != away_t:
             res = pr.analyze_fixture(df_league, home_t, away_t, o1, ox, o2); raw = res["_raw"]
             if cur_res is None: cur_res, cur_h2h, cur_comp = res, pr.get_h2h(df_league, home_t, away_t), selected_comp
-
-            # Display Live League Standings Safely
-            hp = raw.get("h_pos", "Pos: N/A")
-            ap = raw.get("a_pos", "Pos: N/A")
+            hp, ap = raw.get("h_pos", "Pos: N/A"), raw.get("a_pos", "Pos: N/A")
             if hp != "Pos: N/A" and ap != "Pos: N/A":
-                st.markdown(f'<div class="glass-card"><b>🏆 League Position:</b> {home_t} <span class="p-green"><b>{hp}</b></span> &nbsp;vs&nbsp; {away_t} <span class="p-blue"><b>{ap}</b></span></div>', unsafe_allow_html=True)
-
+                st.markdown(f'<div class="glass-card"><b>🏆 League Position:</b> {home_t} <span class="p-green"><b>{hp}</b></span> vs {away_t} <span class="p-blue"><b>{ap}</b></span></div>', unsafe_allow_html=True)
             m1,m2,m3,m4,m5 = st.columns(5)
             m1.metric("Tip", f"{res['Tip']} ({res['Conf']}/10)"); m2.metric("Safest", res["Safest"]); m3.metric("Combo", res["Combo"]); m4.metric("O/U & BTTS", f"{res['O/U 2.5']} | {res['BTTS']}"); m5.metric("Score", res["Score"])
             st.markdown(f'<div class="glass-card"><b>🧠 Verdict ({res["Category"]}):</b> {raw["verdict"]}<br><b>Top 3 Scores:</b> {", ".join(raw["top_scores"])}</div>', unsafe_allow_html=True)
             b1, b2 = st.columns(2)
             if b1.button("🎟️ Add to SportyBet Slip", use_container_width=True):
                 rc = {k:v for k,v in res.items() if k!="_raw"}; rc["Competition"] = selected_comp
-                st.session_state.daily_list.append(rc); pr.save_state("daily_list", st.session_state.daily_list); st.success("Added to SportyBet Slip tab!")
+                st.session_state.daily_list.append(rc); pr.save_state("daily_list", st.session_state.daily_list); st.success("Added!")
             podds = {"1":o1,"X":ox,"2":o2,"1X":round(1/(1/o1+1/ox),2),"X2":round(1/(1/o2+1/ox),2)}.get(res["Tip"], o1)
             if b2.button("💾 Save to Tracker", use_container_width=True):
                 pr.save_bet(selected_comp, res["Match"], res["Tip"], res["Conf"], podds, stake); st.success("Saved!")
             ch, ca = st.columns(2); h5, a5 = raw["h5"], raw["a5"]
-            hb = f" [{hp}]" if hp != "Pos: N/A" else ""
-            ab = f" [{ap}]" if ap != "Pos: N/A" else ""
-            ch.info(f"🏠 **{home_t}{hb}:** Form `{h5['form']}` | Power `{h5['power']}` | GF `{h5['gf']}` GA `{h5['ga']}`")
-            ca.info(f"✈️ **{away_t}{ab}:** Form `{a5['form']}` | Power `{a5['power']}` | GF `{a5['gf']}` GA `{a5['ga']}`")
+            hb, ab = (f" [{hp}]" if hp != "Pos: N/A" else ""), (f" [{ap}]" if ap != "Pos: N/A" else "")
+            ch.info(f"🏠 **{home_t}{hb}:** `{h5['form']}` | Pwr `{h5['power']}` | GF `{h5['gf']}` GA `{h5['ga']}`")
+            ca.info(f"✈️ **{away_t}{ab}:** `{a5['form']}` | Pwr `{a5['power']}` | GF `{a5['gf']}` GA `{a5['ga']}`")
         if upcoming_fixtures:
             st.divider(); st.subheader("📋 Upcoming Analyzed Games")
             rows = []
@@ -302,7 +303,6 @@ with tab_daily:
         t_style = sc1.selectbox("Ticket Style", ["🔒 Safest Acca (Double Chance / Ov 1.5)", "🎯 Model Best Tip (1X2 / DC)", "🔥 Combo Boost (Higher Odds)", "⚽ Goals & GG Only"])
         max_l = sc2.number_input("Max Legs", min_value=1, max_value=10, value=min(5, len(st.session_state.daily_list)))
         t_stake = sc3.number_input("Stake (₦)", min_value=50.0, value=float(prefs.get("stake", 1000.0)), step=100.0, key="sp_stake")
-
         legs, tot_o, est_win, slip_txt = sh.build_sporty_ticket(st.session_state.daily_list, t_style, int(max_l), float(t_stake))
         k1, k2, k3 = st.columns(3)
         k1.metric("Ticket Legs", len(legs)); k2.metric("Est. Total Odds", tot_o); k3.metric("Est. Win (₦)", f"₦{est_win:,.0f}")
